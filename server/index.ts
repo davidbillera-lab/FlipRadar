@@ -42,9 +42,9 @@ app.post("/api/scheduled/deals.processDeals", async (_req, res) => {
 // The compiled bundle lives in ./src — response.html points at /assets/.
 app.use("/assets", express.static(join(ROOT, "src")));
 
-// SPA fallback: serve response.html with rewritten asset paths.
+// SPA fallback: serve clean index.html (no Manus auth runtime).
 app.get("*", (_req, res) => {
-  const html = readFileSync(join(ROOT, "response.html"), "utf-8");
+  const html = readFileSync(join(ROOT, "index.html"), "utf-8");
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
