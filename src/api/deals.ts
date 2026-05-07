@@ -1,5 +1,5 @@
-// tRPC mutation for processing deals
-export const processDeals = async () => {
-  // This is the buggy mutation that was returning 403 on non-scheduled paths
-  console.log("Processing deals...");
-};
+// Thin proxy to the server-side deal processing job.
+// The real implementation lives in server/jobs/process-deals.ts and is
+// exposed via tRPC at /api/trpc and via the scheduled-task endpoint at
+// POST /api/scheduled/deals.processDeals.
+export { processUnscoredDeals as processDeals } from "../../server/jobs/process-deals.js";
