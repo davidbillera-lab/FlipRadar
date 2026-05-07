@@ -19,6 +19,9 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
+// Manus OAuth callback — just redirect home; auth.me returns a local user so no re-redirect.
+app.get("/api/oauth/callback", (_req, res) => res.redirect("/"));
+
 app.use(
   "/api/trpc",
   createExpressMiddleware({

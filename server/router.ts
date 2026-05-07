@@ -14,7 +14,15 @@ import { randomUUID } from "node:crypto";
 
 const CATEGORIES = ["electronics", "antiques", "collectibles", "power_tools"] as const;
 
+// Local user returned for auth.me — bypasses Manus OAuth entirely.
+const LOCAL_USER = { id: "local", name: "Local User", email: "local@flipradar.local" };
+
 export const appRouter = router({
+  auth: router({
+    me: publicProcedure.query(() => LOCAL_USER),
+    logout: publicProcedure.mutation(() => ({ ok: true })),
+  }),
+
   deals: router({
     list: publicProcedure
       .input(
