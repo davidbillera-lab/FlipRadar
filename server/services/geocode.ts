@@ -7,22 +7,33 @@ export interface GeocodeResult {
   formatted?: string;
 }
 
-const cache = rawDb.prepare(
-  "SELECT lat, lng, formatted FROM geocode_cache WHERE address = ?",
-);
-const insert = rawDb.prepare(
-  "INSERT OR REPLACE INTO geocode_cache (address, lat, lng, formatted, created_at) VALUES (?, ?, ?, ?, ?)",
-);
+// Lazy-init prepared statements so this module is safe to import before
+// migrations have run (e.g. during top-level evaluation of router.ts).
+let _selectStmt: ReturnType<typeof rawDb.prepare> | null = null;
+let _insertStmt: ReturnType<typeof rawDb.prepare> | null = null;
+function stmts() {
+  if (!_selectStmt) {
+    _selectStmt = rawDb.prepare(
+      "SELECT lat, lng, formatted FROM geocode_cache WHERE address = ?",
+    );
+    _insertStmt = rawDb.prepare(
+      "INSERT OR REPLACE INTO geocode_cache (address, lat, lng, formatted, created_at) VALUES (?, ?, ?, ?, ?)",
+    );
+  }
+  return { select: _selectStmt!, insert: _insertStmt! };
+}
 
-/**
- * Geocode a free-form address using Google Geocoding API.
- * Cached forever (addresses don't move). Returns null on miss / error / no-key.
- */
 export async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
   const trimmed = address.trim();
   if (!trimmed) return null;
 
-  const hit: any = cache.get(trimmed);
+  let hit: any = null;
+  try {
+    hit = stmts().select.get(trimmed);
+  } catch (e) {
+    // table missing — fall through to API call (no cache)
+    console.warn(`[geocode] cache read failed (continuing): ${(e as Error).message}`);
+  }
   if (hit) {
     return { lat: hit.lat, lng: hit.lng, formatted: hit.formatted ?? undefined };
   }
@@ -56,7 +67,11 @@ export async function geocodeAddress(address: string): Promise<GeocodeResult | n
       lng: r.geometry.location.lng,
       formatted: r.formatted_address,
     };
-    insert.run(trimmed, result.lat, result.lng, result.formatted ?? null, Date.now());
+    try {
+      stmts().insert.run(trimmed, result.lat, result.lng, result.formatted ?? null, Date.now());
+    } catch (e) {
+      console.warn(`[geocode] cache write failed (continuing): ${(e as Error).message}`);
+    }
     return result;
   } catch (e) {
     console.error(`[geocode] error for "${trimmed}":`, (e as Error).message);

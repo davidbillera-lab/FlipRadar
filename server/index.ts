@@ -5,8 +5,12 @@ import cron from "node-cron";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { appRouter } from "./router.js";
+// IMPORTANT: migrate must run before router/services that touch the DB.
+// migrate.ts runs runMigrations() as a top-level side effect on import, so
+// importing it here guarantees tables exist before any downstream module
+// (e.g. services/geocode.ts) prepares statements at its own module load.
 import { runMigrations } from "./db/migrate.js";
+import { appRouter } from "./router.js";
 import { processUnscoredDeals } from "./jobs/process-deals.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -52,7 +56,7 @@ app.get("*", (_req, res) => {
   res.send(html);
 });
 
-runMigrations();
+// runMigrations() already ran during the import side-effect above.
 
 const cronExpr = process.env.SCRAPER_CRON ?? "*/30 * * * *";
 if (cronExpr && cron.validate(cronExpr)) {

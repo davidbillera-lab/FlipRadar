@@ -53,9 +53,9 @@ export function runMigrations() {
   }
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`;
-if (isMain) {
-  runMigrations();
-  console.log("Migrations applied.");
-  process.exit(0);
-}
+// Always run when this file is invoked directly (npm run db:migrate).
+// The previous `import.meta.url === file://${argv[1]}` check fails on Windows
+// because of slash/case differences. Detecting "is CLI" is unreliable across
+// platforms, so we just always run — runMigrations is idempotent.
+runMigrations();
+console.log("Migrations applied.");
