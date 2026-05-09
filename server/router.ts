@@ -51,6 +51,57 @@ const garageSalesWithNid = () =>
     .from(schema.garageSales)
     .$dynamic();
 
+/**
+ * Determine which cities to scrape for the deal feed. Priority:
+ *   1. cities[] passed in the mutation input
+ *   2. city (single) passed in the mutation input
+ *   3. settings.scraper_cities (JSON array, e.g. ["Denver","Boulder"])
+ *   4. settings.scraper_city (single string)
+ *   5. process.env.SCRAPER_CITY (comma-separated allowed)
+ *   6. fallback: ["denver"]
+ */
+async function resolveScraperCities(
+  inputCity?: string,
+  inputCities?: string[],
+): Promise<string[]> {
+  if (inputCities?.length) return inputCities;
+  if (inputCity) return [inputCity];
+
+  const arrRow = await db
+    .select()
+    .from(schema.settings)
+    .where(eq(schema.settings.key, "scraper_cities"))
+    .get();
+  if (arrRow) {
+    try {
+      const parsed = JSON.parse(arrRow.value);
+      if (Array.isArray(parsed) && parsed.length) return parsed.map(String);
+      if (typeof parsed === "string" && parsed.trim()) return [parsed];
+    } catch {}
+  }
+
+  const singleRow = await db
+    .select()
+    .from(schema.settings)
+    .where(eq(schema.settings.key, "scraper_city"))
+    .get();
+  if (singleRow) {
+    try {
+      const v = JSON.parse(singleRow.value);
+      if (typeof v === "string" && v.trim()) return [v];
+    } catch {
+      if (singleRow.value) return [singleRow.value];
+    }
+  }
+
+  const envCity = process.env.SCRAPER_CITY;
+  if (envCity?.trim()) {
+    return envCity.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+
+  return ["denver"];
+}
+
 function reshapeGarageSale(s: any) {
   if (!s) return null;
   return {
@@ -142,35 +193,45 @@ export const appRouter = router({
       }),
 
     runScraper: publicProcedure
-      .input(z.object({ includeFacebook: z.boolean().optional(), city: z.string().optional() }).optional())
+      .input(
+        z
+          .object({
+            includeFacebook: z.boolean().optional(),
+            city: z.string().optional(),
+            cities: z.array(z.string()).optional(),
+          })
+          .optional(),
+      )
       .mutation(async ({ input }) => {
-        const city = input?.city ?? process.env.SCRAPER_CITY ?? "denver";
+        const cities = await resolveScraperCities(input?.city, input?.cities);
         let clNew = 0, clSkipped = 0;
-        for (const cat of CATEGORIES) {
-          const found = await scrapeCraigslist({ city, category: cat, limit: 30 });
-          for (const f of found) {
-            try {
-              const r: any = await db
-                .insert(schema.deals)
-                .values({
-                  id: randomUUID(),
-                  platform: f.platform,
-                  sourceUrl: f.sourceUrl,
-                  title: f.title,
-                  description: f.description,
-                  city: f.city,
-                  category: cat,
-                  askingPrice: f.askingPrice,
-                  imageUrl: f.imageUrl,
-                  createdAt: new Date(),
-                  updatedAt: new Date(),
-                })
-                .onConflictDoNothing()
-                .run();
-              if (r?.changes) clNew++;
-              else clSkipped++;
-            } catch {
-              clSkipped++;
+        for (const city of cities) {
+          for (const cat of CATEGORIES) {
+            const found = await scrapeCraigslist({ city, category: cat, limit: 30 });
+            for (const f of found) {
+              try {
+                const r: any = await db
+                  .insert(schema.deals)
+                  .values({
+                    id: randomUUID(),
+                    platform: f.platform,
+                    sourceUrl: f.sourceUrl,
+                    title: f.title,
+                    description: f.description,
+                    city: f.city,
+                    category: cat,
+                    askingPrice: f.askingPrice,
+                    imageUrl: f.imageUrl,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                  })
+                  .onConflictDoNothing()
+                  .run();
+                if (r?.changes) clNew++;
+                else clSkipped++;
+              } catch {
+                clSkipped++;
+              }
             }
           }
         }
