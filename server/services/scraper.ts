@@ -37,15 +37,10 @@ async function fetchHtml(url: string): Promise<string> {
       "Accept-Language": "en-US,en;q=0.9",
     },
   });
-  if (res.statusCode !== 200) {
-    throw new Error(`fetch ${url} failed: ${res.statusCode}`);
-  }
+  if (res.statusCode !== 200) throw new Error(`fetch ${url} failed: ${res.statusCode}`);
   return res.body.text();
 }
 
-/**
- * Craigslist "for sale by owner" search. We focus on tools, electronics, antiques, collectibles.
- */
 const CL_CATEGORIES: Record<string, string> = {
   electronics: "ela",
   antiques: "ata",
@@ -53,16 +48,146 @@ const CL_CATEGORIES: Record<string, string> = {
   power_tools: "tla",
 };
 
+// Map of normalized city slugs → Craigslist subdomain.
+// Craigslist subdomains often differ from human-readable city names.
+const CL_SUBDOMAIN: Record<string, string> = {
+  // Colorado
+  denver: "denver",
+  boulder: "denver",
+  aurora: "denver",
+  lakewood: "denver",
+  thornton: "denver",
+  fortcollins: "fortcollins",
+  coloradosprings: "cosprings",
+  pueblo: "pueblo",
+  grandjunction: "westslope",
+  // California
+  losangeles: "losangeles",
+  sandiego: "sandiego",
+  sanfrancisco: "sfbay",
+  oakland: "sfbay",
+  sanjose: "sfbay",
+  sacramento: "sacramento",
+  fresno: "fresno",
+  bakersfield: "bakersfield",
+  // Texas
+  austin: "austin",
+  dallas: "dallas",
+  houston: "houston",
+  sanantonio: "sanantonio",
+  fortworth: "dallas",
+  elpaso: "elpaso",
+  // Arizona
+  phoenix: "phoenix",
+  tucson: "tucson",
+  // New York
+  newyork: "newyork",
+  buffalo: "buffalo",
+  rochester: "rochester",
+  // Washington
+  seattle: "seattle",
+  spokane: "spokane",
+  // Oregon
+  portland: "portland",
+  eugene: "eugene",
+  // Nevada
+  lasvegas: "lasvegas",
+  reno: "reno",
+  // Utah
+  saltlakecity: "saltlakecity",
+  // Florida
+  miami: "miami",
+  orlando: "orlando",
+  tampa: "tampa",
+  jacksonville: "jacksonville",
+  // Georgia
+  atlanta: "atlanta",
+  // Illinois
+  chicago: "chicago",
+  // Massachusetts
+  boston: "boston",
+  // Pennsylvania
+  philadelphia: "philadelphia",
+  pittsburgh: "pittsburgh",
+  // Michigan
+  detroit: "detroit",
+  // Ohio
+  cleveland: "cleveland",
+  columbus: "columbus",
+  cincinnati: "cincinnati",
+  // North Carolina
+  charlotte: "charlotte",
+  raleigh: "raleigh",
+  // Tennessee
+  nashville: "nashville",
+  memphis: "memphis",
+  // Minnesota
+  minneapolis: "minneapolis",
+  // Missouri
+  stlouis: "stlouis",
+  kansascity: "kansascity",
+  // DC
+  washingtondc: "washingtondc",
+  // New Mexico
+  albuquerque: "albuquerque",
+};
+
+function slug(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+export function resolveCraigslistSubdomain(city: string): string {
+  const s = slug(city);
+  if (CL_SUBDOMAIN[s]) return CL_SUBDOMAIN[s];
+  console.warn(
+    `[scraper] no Craigslist subdomain mapped for "${city}" — falling back to "${s}". ` +
+      `If results are empty, add an entry to CL_SUBDOMAIN in server/services/scraper.ts.`,
+  );
+  return s;
+}
+
+function parseClStaticResults(
+  $: cheerio.CheerioAPI,
+  opts: { city: string; subdomain: string; limit: number },
+): ScrapedListing[] {
+  const out: ScrapedListing[] = [];
+  $("li.cl-static-search-result").each((_, el) => {
+    if (out.length >= opts.limit) return false;
+    const $el = $(el);
+    const link = $el.find("a").first();
+    const href = link.attr("href");
+    const title = $el.find(".title").first().text().trim() || $el.attr("title") || "";
+    const priceText = $el.find(".price").first().text().trim();
+    const m = priceText.match(/\$?([\d,]+)/);
+    const price = m ? Number(m[1]!.replace(/,/g, "")) : NaN;
+    const cityText = $el.find(".location").first().text().trim() || opts.city;
+    if (href && title && Number.isFinite(price)) {
+      out.push({
+        platform: "craigslist",
+        sourceUrl: href.startsWith("http") ? href : `https://${opts.subdomain}.craigslist.org${href}`,
+        title,
+        description: null,
+        city: cityText,
+        askingPrice: price,
+        imageUrl: null,
+      });
+    }
+    return undefined;
+  });
+  return out;
+}
+
 export async function scrapeCraigslist(opts: {
   city: string;
   category?: keyof typeof CL_CATEGORIES;
   maxPrice?: number;
   limit?: number;
 }): Promise<ScrapedListing[]> {
+  const subdomain = resolveCraigslistSubdomain(opts.city);
   const cat = (opts.category && CL_CATEGORIES[opts.category]) || "sss";
-  const params = new URLSearchParams({ srchType: "T", hasPic: "1" });
+  const params = new URLSearchParams({ hasPic: "1" });
   if (opts.maxPrice) params.set("max_price", String(opts.maxPrice));
-  const url = `https://${opts.city}.craigslist.org/search/${cat}?${params}`;
+  const url = `https://${subdomain}.craigslist.org/search/${cat}?${params}`;
 
   let html: string;
   try {
@@ -71,44 +196,51 @@ export async function scrapeCraigslist(opts: {
     console.error(`[scraper] craigslist ${url}: ${(e as Error).message}`);
     return [];
   }
-
   const $ = cheerio.load(html);
-  const listings: ScrapedListing[] = [];
-  const limit = opts.limit ?? 30;
-
-  $(".cl-search-result, li.result-row").each((_, el) => {
-    if (listings.length >= limit) return false;
-    const $el = $(el);
-    const link = $el.find("a.posting-title, a.result-title").first();
-    const href = link.attr("href");
-    const title = link.text().trim() || $el.find(".title").text().trim();
-    const priceText = $el.find(".priceinfo, .result-price").first().text().trim();
-    const priceMatch = priceText.match(/\$?([\d,]+)/);
-    const price = priceMatch ? Number(priceMatch[1]!.replace(/,/g, "")) : NaN;
-    const img = $el.find("img").first().attr("src") ?? null;
-
-    if (href && title && Number.isFinite(price)) {
-      listings.push({
-        platform: "craigslist",
-        sourceUrl: href.startsWith("http") ? href : `https://${opts.city}.craigslist.org${href}`,
-        title,
-        description: null,
-        city: opts.city,
-        askingPrice: price,
-        imageUrl: img,
-      });
-    }
-    return undefined;
-  });
-
-  return listings;
+  return parseClStaticResults($, { city: opts.city, subdomain, limit: opts.limit ?? 30 });
 }
 
 /**
- * Craigslist garage sales search.
+ * Extract address + coordinates from a Craigslist detail page.
+ * Returns nulls when the seller didn't share a map location.
  */
-export async function scrapeCraigslistGarageSales(city: string, limit = 30): Promise<ScrapedGarageSale[]> {
-  const url = `https://${city}.craigslist.org/search/gms?postedToday=1`;
+export async function fetchCraigslistDetail(
+  detailUrl: string,
+): Promise<{ address: string | null; lat: number | null; lng: number | null; description: string | null }> {
+  let html: string;
+  try {
+    html = await fetchHtml(detailUrl);
+  } catch (e) {
+    console.error(`[scraper] cl detail ${detailUrl}: ${(e as Error).message}`);
+    return { address: null, lat: null, lng: null, description: null };
+  }
+  const $ = cheerio.load(html);
+
+  // The map div carries data-latitude / data-longitude attributes when present
+  const latStr = $("#map").attr("data-latitude") ?? null;
+  const lngStr = $("#map").attr("data-longitude") ?? null;
+  const lat = latStr ? Number(latStr) : null;
+  const lng = lngStr ? Number(lngStr) : null;
+
+  // Address is often inside .mapaddress
+  const address = $(".mapaddress").first().text().trim() || null;
+
+  const description = $("#postingbody").text().trim() || null;
+
+  return {
+    address,
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lng) ? lng : null,
+    description,
+  };
+}
+
+export async function scrapeCraigslistGarageSales(
+  city: string,
+  limit = 30,
+): Promise<ScrapedGarageSale[]> {
+  const subdomain = resolveCraigslistSubdomain(city);
+  const url = `https://${subdomain}.craigslist.org/search/gms`;
   let html: string;
   try {
     html = await fetchHtml(url);
@@ -116,57 +248,43 @@ export async function scrapeCraigslistGarageSales(city: string, limit = 30): Pro
     console.error(`[scraper] cl garage ${url}: ${(e as Error).message}`);
     return [];
   }
-
   const $ = cheerio.load(html);
   const sales: ScrapedGarageSale[] = [];
-
-  $(".cl-search-result, li.result-row").each((_, el) => {
+  $("li.cl-static-search-result").each((_, el) => {
     if (sales.length >= limit) return false;
     const $el = $(el);
-    const link = $el.find("a.posting-title, a.result-title").first();
+    const link = $el.find("a").first();
     const href = link.attr("href");
-    const title = link.text().trim() || $el.find(".title").text().trim();
-    const date = $el.find("time").attr("datetime") ?? null;
-    const img = $el.find("img").first().attr("src");
-
+    const title = $el.find(".title").first().text().trim() || $el.attr("title") || "";
+    const cityText = $el.find(".location").first().text().trim() || city;
     if (href && title) {
       sales.push({
         platform: "craigslist",
-        sourceUrl: href.startsWith("http") ? href : `https://${city}.craigslist.org${href}`,
+        sourceUrl: href.startsWith("http") ? href : `https://${subdomain}.craigslist.org${href}`,
         title,
         description: null,
-        city,
+        city: cityText,
         address: null,
         lat: null,
         lng: null,
-        saleDate: date,
-        images: img ? [img] : [],
+        saleDate: null,
+        images: [],
       });
     }
     return undefined;
   });
-
   return sales;
 }
 
-/**
- * Facebook Marketplace requires authentication and aggressively blocks scrapers.
- * Without a logged-in session there is no reliable way to fetch listings server-side.
- * To support Facebook listings, users can paste a marketplace URL into the
- * "Import Deal URL" form on the dashboard — that path is handled in the router.
- */
 export async function scrapeFacebookMarketplace(): Promise<ScrapedListing[]> {
-  console.warn(
-    "[scraper] Facebook Marketplace requires auth; use the Import URL flow on the dashboard instead.",
-  );
+  console.warn("[scraper] Facebook Marketplace requires auth; use Import URL instead.");
   return [];
 }
 
-/**
- * Best-effort parse of a single Facebook Marketplace or Craigslist URL.
- * Used by the "Import Deal URL" UI button.
- */
-export async function importListingFromUrl(url: string, city: string): Promise<ScrapedListing | null> {
+export async function importListingFromUrl(
+  url: string,
+  city: string,
+): Promise<ScrapedListing | null> {
   let html: string;
   try {
     html = await fetchHtml(url);
@@ -176,12 +294,9 @@ export async function importListingFromUrl(url: string, city: string): Promise<S
   }
   const $ = cheerio.load(html);
   const isFb = /facebook\.com/.test(url);
-
   const ogTitle = $('meta[property="og:title"]').attr("content");
   const ogDesc = $('meta[property="og:description"]').attr("content");
   const ogImage = $('meta[property="og:image"]').attr("content");
-
-  // Craigslist exposes price in markup; FB hides behind JSON in the HTML.
   let price = NaN;
   const clPrice = $(".price").first().text().trim();
   const m1 = clPrice.match(/\$([\d,]+)/);
@@ -194,11 +309,9 @@ export async function importListingFromUrl(url: string, city: string): Promise<S
     const m3 = html.match(/"amount_with_offset_in_currency":"([\d.]+)"/);
     if (m3) price = Number(m3[1]);
   }
-
   const title = ogTitle ?? $("title").text().trim();
   const description = $("#postingbody").text().trim() || ogDesc || null;
   if (!title || !Number.isFinite(price)) return null;
-
   return {
     platform: isFb ? "facebook" : "craigslist",
     sourceUrl: url,
@@ -210,10 +323,11 @@ export async function importListingFromUrl(url: string, city: string): Promise<S
   };
 }
 
-/**
- * EstateSales.net has a public listing index by city.
- */
-export async function scrapeEstateSalesNet(city: string, state = "CO", limit = 20): Promise<ScrapedGarageSale[]> {
+export async function scrapeEstateSalesNet(
+  city: string,
+  state = "CO",
+  limit = 20,
+): Promise<ScrapedGarageSale[]> {
   const url = `https://www.estatesales.net/${state}/${city.replace(/\s+/g, "-")}`;
   let html: string;
   try {
@@ -224,7 +338,6 @@ export async function scrapeEstateSalesNet(city: string, state = "CO", limit = 2
   }
   const $ = cheerio.load(html);
   const sales: ScrapedGarageSale[] = [];
-
   $("article.sale, .sale-card, [data-sale-id]").each((_, el) => {
     if (sales.length >= limit) return false;
     const $el = $(el);
@@ -234,7 +347,6 @@ export async function scrapeEstateSalesNet(city: string, state = "CO", limit = 2
     const address = $el.find(".sale-address, address").first().text().trim() || null;
     const date = $el.find("time, .sale-date").first().text().trim() || null;
     const img = $el.find("img").first().attr("src") ?? null;
-
     if (href && title) {
       sales.push({
         platform: "estatesales",
@@ -251,6 +363,5 @@ export async function scrapeEstateSalesNet(city: string, state = "CO", limit = 2
     }
     return undefined;
   });
-
   return sales;
 }

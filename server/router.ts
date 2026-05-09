@@ -1,26 +1,89 @@
 import { z } from "zod";
 import { router, publicProcedure } from "./trpc.js";
 import { db, schema } from "./db/index.js";
-import { eq, sql, and, type SQL } from "drizzle-orm";
-import { processUnscoredDeals, getDealStats } from "./jobs/process-deals.js";
+import { eq, sql, and, getTableColumns, type SQL } from "drizzle-orm";
+import { processUnscoredDeals, getDealStats, rescoreHighRoiFlags } from "./jobs/process-deals.js";
 import {
   scrapeCraigslist,
   scrapeCraigslistGarageSales,
   scrapeFacebookMarketplace,
   scrapeEstateSalesNet,
   importListingFromUrl,
+  fetchCraigslistDetail,
 } from "./services/scraper.js";
+import { geocodeAddress } from "./services/geocode.js";
 import { randomUUID } from "node:crypto";
 
 const CATEGORIES = ["electronics", "antiques", "collectibles", "power_tools"] as const;
-
-// Local user returned for auth.me — bypasses Manus OAuth entirely.
 const LOCAL_USER = { id: "local", name: "Local User", email: "local@flipradar.local" };
+
+function toRow(d: any) {
+  if (!d) return null;
+  const {
+    score, netProfit, roiPct, exitChannel, ebayFees,
+    ebayAvgSold, ebayCompCount, ebaySearchQuery,
+    id: uuid, nid,
+    ...rest
+  } = d;
+  return {
+    deal: { ...rest, id: nid ?? 0, uuid },
+    score: { score, netProfit, roiPct, exitChannel, ebayFees },
+    valuation: {
+      ebayAvgSold,
+      ebayCompCount,
+      ebaySearchQuery,
+      ebayCompsUrl: ebaySearchQuery
+        ? `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(ebaySearchQuery)}&LH_Sold=1&LH_Complete=1`
+        : null,
+    },
+  };
+}
+
+const dealsWithNid = () =>
+  db
+    .select({ ...getTableColumns(schema.deals), nid: sql<number>`rowid` })
+    .from(schema.deals)
+    .$dynamic();
+
+const garageSalesWithNid = () =>
+  db
+    .select({ ...getTableColumns(schema.garageSales), nid: sql<number>`rowid` })
+    .from(schema.garageSales)
+    .$dynamic();
+
+function reshapeGarageSale(s: any) {
+  if (!s) return null;
+  return {
+    ...s,
+    uuid: s.id,
+    id: s.nid ?? 0,
+    images: Array.isArray(s.images) ? s.images : [],
+  };
+}
 
 export const appRouter = router({
   auth: router({
     me: publicProcedure.query(() => LOCAL_USER),
     logout: publicProcedure.mutation(() => ({ ok: true })),
+  }),
+
+  stats: router({
+    summary: publicProcedure.query(async () => {
+      const stats = await getDealStats();
+      let topRow: any = null;
+      if (stats.topDeal?.deal?.id) {
+        const top = await dealsWithNid().where(eq(schema.deals.id, stats.topDeal.deal.id)).get();
+        topRow = top ? toRow(top) : null;
+      }
+      return {
+        totalDeals: stats.totalDeals,
+        avgScore: stats.avgScore,
+        highRoiDeals: stats.highRoiDeals,
+        dealsSold: stats.dealsSold,
+        topDeal: topRow,
+        totalProjectedProfit: stats.totalProjectedProfit,
+      };
+    }),
   }),
 
   deals: router({
@@ -29,170 +92,109 @@ export const appRouter = router({
         z
           .object({
             category: z.string().optional(),
+            flaggedHighRoi: z.boolean().optional(),
             highRoiOnly: z.boolean().optional(),
-            platform: z.enum(["facebook", "craigslist", "estatesales"]).optional(),
+            platform: z.string().optional(),
+            exitChannel: z.string().optional(),
+            status: z.string().optional(),
             tracking: z.boolean().optional(),
+            limit: z.number().optional(),
           })
           .optional(),
       )
       .query(async ({ input }) => {
         const conds: SQL[] = [];
-        if (input?.category && input.category !== "all") {
-          conds.push(eq(schema.deals.category, input.category));
-        }
-        if (input?.highRoiOnly) conds.push(sql`flagged_high_roi = 1`);
-        if (input?.platform) conds.push(eq(schema.deals.platform, input.platform));
+        if (input?.category && input.category !== "all") conds.push(eq(schema.deals.category, input.category));
+        if (input?.flaggedHighRoi || input?.highRoiOnly) conds.push(sql`flagged_high_roi = 1`);
+        if (input?.platform && input.platform !== "all") conds.push(eq(schema.deals.platform, input.platform));
+        if (input?.exitChannel && input.exitChannel !== "all") conds.push(eq(schema.deals.exitChannel, input.exitChannel));
         if (input?.tracking) conds.push(sql`purchase_price IS NOT NULL`);
-
+        if (input?.status === "sold") conds.push(sql`sold_at IS NOT NULL`);
+        else if (input?.status === "tracking") conds.push(sql`purchase_price IS NOT NULL AND sold_at IS NULL`);
+        else if (input?.status === "available") conds.push(sql`purchase_price IS NULL`);
         const where = conds.length ? and(...conds) : undefined;
-        const rows = await db
-          .select()
-          .from(schema.deals)
-          .where(where)
-          .orderBy(sql`score DESC NULLS LAST, created_at DESC`)
-          .limit(200)
+        let q = dealsWithNid();
+        if (where) q = q.where(where);
+        const rows = await q
+          .orderBy(sql`score DESC, created_at DESC`)
+          .limit(input?.limit ?? 200)
           .all();
-        const stats = await getDealStats();
-        return { deals: rows, ...stats };
+        return { rows: rows.map(toRow) };
       }),
 
     get: publicProcedure
-      .input(z.object({ id: z.string() }))
+      .input(z.object({ id: z.union([z.string(), z.number()]).transform((v) => Number(v)) }))
       .query(async ({ input }) => {
-        const deal = await db
-          .select()
-          .from(schema.deals)
-          .where(eq(schema.deals.id, input.id))
-          .get();
-        return { deal: deal ?? null };
+        const d: any = await dealsWithNid().where(sql`rowid = ${input.id}`).get();
+        if (!d) return { deal: null, score: null, valuation: null, tracking: null };
+        const row = toRow(d)!;
+        return {
+          deal: row.deal,
+          score: row.score,
+          valuation: row.valuation,
+          tracking: {
+            purchasePrice: d.purchasePrice,
+            soldPrice: d.soldPrice,
+            actualRoi: d.actualRoi,
+            notes: d.trackingNotes,
+          },
+        };
       }),
 
     runScraper: publicProcedure
-      .input(
-        z.object({
-          city: z.string().optional(),
-          includeFacebook: z.boolean().optional(),
-          includeCraigslist: z.boolean().optional(),
-          includeEstateSales: z.boolean().optional(),
-          maxPrice: z.number().optional(),
-        }),
-      )
+      .input(z.object({ includeFacebook: z.boolean().optional(), city: z.string().optional() }).optional())
       .mutation(async ({ input }) => {
-        const city = input.city ?? process.env.SCRAPER_CITY ?? "denver";
-        let imported = 0;
-
-        if (input.includeCraigslist !== false) {
-          for (const cat of CATEGORIES) {
-            const found = await scrapeCraigslist({
-              city,
-              category: cat,
-              maxPrice: input.maxPrice,
-              limit: 30,
-            });
-            for (const f of found) {
-              try {
-                await db
-                  .insert(schema.deals)
-                  .values({
-                    id: randomUUID(),
-                    platform: f.platform,
-                    sourceUrl: f.sourceUrl,
-                    title: f.title,
-                    description: f.description,
-                    city: f.city,
-                    category: cat,
-                    askingPrice: f.askingPrice,
-                    imageUrl: f.imageUrl,
-                    createdAt: new Date(),
-                    updatedAt: new Date(),
-                  })
-                  .onConflictDoNothing()
-                  .run();
-                imported++;
-              } catch {
-                // ignore dupes
-              }
-            }
-          }
-        }
-
-        if (input.includeFacebook) {
-          // Facebook requires auth; this returns [] and logs guidance.
-          const fb = await scrapeFacebookMarketplace();
-          for (const _f of fb) imported++;
-        }
-
-        if (input.includeEstateSales) {
-          const sales = await scrapeEstateSalesNet(city);
-          for (const s of sales) {
+        const city = input?.city ?? process.env.SCRAPER_CITY ?? "denver";
+        let clNew = 0, clSkipped = 0;
+        for (const cat of CATEGORIES) {
+          const found = await scrapeCraigslist({ city, category: cat, limit: 30 });
+          for (const f of found) {
             try {
-              await db
-                .insert(schema.garageSales)
+              const r: any = await db
+                .insert(schema.deals)
                 .values({
                   id: randomUUID(),
-                  platform: s.platform,
-                  sourceUrl: s.sourceUrl,
-                  title: s.title,
-                  description: s.description,
-                  city: s.city,
-                  address: s.address,
-                  lat: s.lat,
-                  lng: s.lng,
-                  saleDate: s.saleDate,
-                  images: s.images,
+                  platform: f.platform,
+                  sourceUrl: f.sourceUrl,
+                  title: f.title,
+                  description: f.description,
+                  city: f.city,
+                  category: cat,
+                  askingPrice: f.askingPrice,
+                  imageUrl: f.imageUrl,
                   createdAt: new Date(),
+                  updatedAt: new Date(),
                 })
                 .onConflictDoNothing()
                 .run();
+              if (r?.changes) clNew++;
+              else clSkipped++;
             } catch {
-              // ignore
+              clSkipped++;
             }
           }
         }
-
-        // Always also pull garage sales from craigslist
-        const clSales = await scrapeCraigslistGarageSales(city);
-        for (const s of clSales) {
-          try {
-            await db
-              .insert(schema.garageSales)
-              .values({
-                id: randomUUID(),
-                platform: s.platform,
-                sourceUrl: s.sourceUrl,
-                title: s.title,
-                description: s.description,
-                city: s.city,
-                address: s.address,
-                lat: s.lat,
-                lng: s.lng,
-                saleDate: s.saleDate,
-                images: s.images,
-                createdAt: new Date(),
-              })
-              .onConflictDoNothing()
-              .run();
-          } catch {
-            // ignore
-          }
+        let fbNew = 0, fbSkipped = 0;
+        if (input?.includeFacebook) {
+          const fb = await scrapeFacebookMarketplace();
+          for (const _ of fb) fbNew++;
         }
-
-        return { imported };
+        return {
+          craigslist: { newListings: clNew, skipped: clSkipped },
+          facebook: { newListings: fbNew, skipped: fbSkipped },
+        };
       }),
 
-    processDeals: publicProcedure.mutation(async () => {
-      const r = await processUnscoredDeals();
-      return r;
-    }),
+    processDeals: publicProcedure.mutation(async () => await processUnscoredDeals()),
+
+    rescoreFlags: publicProcedure.mutation(async () => await rescoreHighRoiFlags()),
 
     importUrl: publicProcedure
-      .input(z.object({ url: z.string().url(), city: z.string().optional() }))
+      .input(z.object({ url: z.string().url(), source: z.string().optional(), city: z.string().optional() }))
       .mutation(async ({ input }) => {
         const city = input.city ?? process.env.SCRAPER_CITY ?? "denver";
         const listing = await importListingFromUrl(input.url, city);
-        if (!listing) {
-          throw new Error("Could not parse listing from URL");
-        }
+        if (!listing) throw new Error("Could not parse listing from URL");
         const id = randomUUID();
         await db
           .insert(schema.deals)
@@ -216,24 +218,32 @@ export const appRouter = router({
     updateTracking: publicProcedure
       .input(
         z.object({
-          id: z.string(),
+          dealId: z.union([z.string(), z.number()]).transform((v) => Number(v)),
           purchasePrice: z.number().nullable().optional(),
           soldPrice: z.number().nullable().optional(),
+          actualRoi: z.number().nullable().optional(),
           notes: z.string().nullable().optional(),
         }),
       )
       .mutation(async ({ input }) => {
-        const soldAt = input.soldPrice != null ? new Date() : null;
+        // soldAt is set when soldPrice is provided, cleared when soldPrice is explicitly null
+        const soldAt =
+          input.soldPrice == null
+            ? null
+            : input.soldPrice > 0
+              ? new Date()
+              : null;
         await db
           .update(schema.deals)
           .set({
             purchasePrice: input.purchasePrice ?? null,
             soldPrice: input.soldPrice ?? null,
+            actualRoi: input.actualRoi ?? null,
             soldAt,
             trackingNotes: input.notes ?? null,
             updatedAt: new Date(),
           })
-          .where(eq(schema.deals.id, input.id))
+          .where(sql`rowid = ${input.dealId}`)
           .run();
         return { ok: true };
       }),
@@ -241,35 +251,187 @@ export const appRouter = router({
 
   garageSales: router({
     list: publicProcedure
-      .input(z.object({ city: z.string().optional() }).optional())
+      .input(
+        z
+          .object({
+            city: z.string().optional(),
+            status: z.string().optional(),
+            limit: z.number().optional(),
+          })
+          .optional(),
+      )
       .query(async ({ input }) => {
-        const where = input?.city ? eq(schema.garageSales.city, input.city) : undefined;
-        const rows = await db
-          .select()
-          .from(schema.garageSales)
-          .where(where)
-          .orderBy(sql`created_at DESC`)
-          .limit(200)
-          .all();
-        return { sales: rows };
+        const conds: SQL[] = [];
+        if (input?.city) conds.push(eq(schema.garageSales.city, input.city));
+        if (input?.status && input.status !== "all") conds.push(eq(schema.garageSales.status, input.status));
+        const where = conds.length ? and(...conds) : undefined;
+        let q = garageSalesWithNid();
+        if (where) q = q.where(where);
+        const raw = await q.orderBy(sql`created_at DESC`).limit(input?.limit ?? 200).all();
+        const rows = raw.map(reshapeGarageSale);
+        return { rows, sales: rows, total: rows.length };
+      }),
+
+    get: publicProcedure
+      .input(z.object({ id: z.union([z.string(), z.number()]).transform((v) => Number(v)) }))
+      .query(async ({ input }) => {
+        const s: any = await garageSalesWithNid().where(sql`rowid = ${input.id}`).get();
+        return { sale: reshapeGarageSale(s) };
+      }),
+
+    scrape: publicProcedure
+      .input(
+        z
+          .object({
+            cities: z.array(z.string()).optional(),
+            includeFacebook: z.boolean().optional(),
+            includeEstateSales: z.boolean().optional(),
+          })
+          .optional(),
+      )
+      .mutation(async ({ input }) => {
+        const cities = input?.cities ?? [process.env.SCRAPER_CITY ?? "denver"];
+        const sources: string[] = [];
+        let newListings = 0;
+
+        for (const city of cities) {
+          const cl = await scrapeCraigslistGarageSales(city);
+          if (cl.length) sources.push("Craigslist");
+
+          for (const s of cl) {
+            // Enrich with detail-page address + coords
+            let address = s.address;
+            let lat = s.lat;
+            let lng = s.lng;
+            let description = s.description;
+            try {
+              const detail = await fetchCraigslistDetail(s.sourceUrl);
+              address = detail.address ?? address;
+              lat = detail.lat ?? lat;
+              lng = detail.lng ?? lng;
+              description = detail.description ?? description;
+            } catch {}
+
+            // If we have an address but no coords, geocode
+            if (address && (lat == null || lng == null)) {
+              const g = await geocodeAddress(`${address}, ${city}`);
+              if (g) {
+                lat = g.lat;
+                lng = g.lng;
+              }
+            }
+
+            try {
+              const r: any = await db
+                .insert(schema.garageSales)
+                .values({
+                  id: randomUUID(),
+                  platform: s.platform,
+                  sourceUrl: s.sourceUrl,
+                  title: s.title,
+                  description,
+                  city: s.city,
+                  address,
+                  lat,
+                  lng,
+                  saleDate: s.saleDate,
+                  images: s.images,
+                  createdAt: new Date(),
+                })
+                .onConflictDoNothing()
+                .run();
+              if (r?.changes) newListings++;
+            } catch {}
+          }
+
+          if (input?.includeEstateSales) {
+            const es = await scrapeEstateSalesNet(city);
+            if (es.length) sources.push("EstateSales.net");
+            for (const s of es) {
+              let lat = s.lat;
+              let lng = s.lng;
+              if (s.address && (lat == null || lng == null)) {
+                const g = await geocodeAddress(`${s.address}, ${city}`);
+                if (g) {
+                  lat = g.lat;
+                  lng = g.lng;
+                }
+              }
+              try {
+                const r: any = await db
+                  .insert(schema.garageSales)
+                  .values({
+                    id: randomUUID(),
+                    platform: s.platform,
+                    sourceUrl: s.sourceUrl,
+                    title: s.title,
+                    description: s.description,
+                    city: s.city,
+                    address: s.address,
+                    lat,
+                    lng,
+                    saleDate: s.saleDate,
+                    images: s.images,
+                    createdAt: new Date(),
+                  })
+                  .onConflictDoNothing()
+                  .run();
+                if (r?.changes) newListings++;
+              } catch {}
+            }
+          }
+        }
+        return { newListings, sources: Array.from(new Set(sources)) };
+      }),
+
+    update: publicProcedure
+      .input(
+        z.object({
+          id: z.union([z.string(), z.number()]).transform((v) => Number(v)),
+          status: z.string().optional(),
+          notes: z.string().optional(),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        const patch: any = {};
+        if (input.status !== undefined) patch.status = input.status;
+        if (input.notes !== undefined) patch.notes = input.notes;
+        if (Object.keys(patch).length) {
+          await db.update(schema.garageSales).set(patch).where(sql`rowid = ${input.id}`).run();
+        }
+        return { ok: true };
       }),
   }),
 
   settings: router({
     get: publicProcedure.query(async () => {
       const rows = await db.select().from(schema.settings).all();
-      const out: Record<string, string> = {};
-      for (const r of rows) out[r.key] = r.value;
+      const out: Record<string, any> = {};
+      for (const r of rows) {
+        try {
+          out[r.key] = JSON.parse(r.value);
+        } catch {
+          out[r.key] = r.value;
+        }
+      }
       return out;
     }),
-    set: publicProcedure
-      .input(z.object({ key: z.string(), value: z.string() }))
+    update: publicProcedure
+      .input(z.object({}).passthrough())
       .mutation(async ({ input }) => {
-        await db
-          .insert(schema.settings)
-          .values({ key: input.key, value: input.value })
-          .onConflictDoUpdate({ target: schema.settings.key, set: { value: input.value } })
-          .run();
+        for (const [key, value] of Object.entries(input)) {
+          await db
+            .insert(schema.settings)
+            .values({ key, value: JSON.stringify(value) })
+            .onConflictDoUpdate({ target: schema.settings.key, set: { value: JSON.stringify(value) } })
+            .run();
+        }
+        // Re-evaluate high-ROI flag against new thresholds
+        try {
+          await rescoreHighRoiFlags();
+        } catch (e) {
+          console.error("[settings.update] rescore failed:", (e as Error).message);
+        }
         return { ok: true };
       }),
   }),
