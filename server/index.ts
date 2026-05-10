@@ -12,6 +12,8 @@ import { dirname, join, resolve } from "node:path";
 import { runMigrations } from "./db/migrate.js";
 import { appRouter } from "./router.js";
 import { processUnscoredDeals } from "./jobs/process-deals.js";
+import { db, schema } from "./db/index.js";
+import { optimizeRoute } from "./services/route.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -33,6 +35,56 @@ app.use(
     createContext: () => ({}),
   }),
 );
+
+// Route planner — POST { startAddress, saleIds? } → optimized order.
+// If saleIds is omitted, uses every garage sale with lat/lng and status != "skipped".
+app.post("/api/route/optimize", async (req, res) => {
+  try {
+    const startAddress = String(req.body?.startAddress ?? "").trim();
+    if (!startAddress) {
+      res.status(400).json({ ok: false, error: "startAddress required" });
+      return;
+    }
+    const saleIds: string[] | undefined = Array.isArray(req.body?.saleIds)
+      ? req.body.saleIds.map(String)
+      : undefined;
+
+    const all = await db.select().from(schema.garageSales).all();
+    const eligible = all
+      .filter((s) => s.lat != null && s.lng != null && s.status !== "skipped")
+      .filter((s) => !saleIds || saleIds.includes(s.id))
+      .map((s) => ({
+        id: s.id,
+        title: s.title,
+        address: s.address,
+        lat: s.lat as number,
+        lng: s.lng as number,
+      }));
+
+    if (!eligible.length) {
+      res.status(400).json({ ok: false, error: "no eligible garage sales (need lat/lng)" });
+      return;
+    }
+
+    const result = await optimizeRoute({ startAddress, sales: eligible });
+    if (!result) {
+      res.status(502).json({ ok: false, error: "route optimization failed (see server logs)" });
+      return;
+    }
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: (e as Error).message });
+  }
+});
+
+// Standalone route planner page.
+app.get("/route", (_req, res) => {
+  const html = readFileSync(join(ROOT, "server", "route-page.html"), "utf-8")
+    .replace("__GOOGLE_MAPS_API_KEY__", process.env.GOOGLE_MAPS_API_KEY ?? "");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(html);
+});
 
 // Scheduled task endpoint hit by score_deals.sh
 app.post("/api/scheduled/deals.processDeals", async (_req, res) => {
