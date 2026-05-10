@@ -14,6 +14,12 @@ import {
 import { geocodeAddress } from "./services/geocode.js";
 import { randomUUID } from "node:crypto";
 
+// Tracks the most recent city to produce rows during a scrape run.
+// `garageSales.list` falls back to this when the requested city has no rows,
+// so that scraping a non-default city makes those rows visible in a dashboard
+// that's hard-coded to the default city.
+let lastScrapedCityWithRows: string | null = null;
+
 const CATEGORIES = ["electronics", "antiques", "collectibles", "power_tools"] as const;
 const LOCAL_USER = { id: "local", name: "Local User", email: "local@flipradar.local" };
 
@@ -322,13 +328,22 @@ export const appRouter = router({
           .optional(),
       )
       .query(async ({ input }) => {
-        const conds: SQL[] = [];
-        if (input?.city) conds.push(eq(schema.garageSales.city, input.city));
-        if (input?.status && input.status !== "all") conds.push(eq(schema.garageSales.status, input.status));
-        const where = conds.length ? and(...conds) : undefined;
-        let q = garageSalesWithNid();
-        if (where) q = q.where(where);
-        const raw = await q.orderBy(sql`created_at DESC`).limit(input?.limit ?? 200).all();
+        const buildQuery = (city?: string) => {
+          const conds: SQL[] = [];
+          if (city) conds.push(eq(schema.garageSales.city, city));
+          if (input?.status && input.status !== "all") conds.push(eq(schema.garageSales.status, input.status));
+          const where = conds.length ? and(...conds) : undefined;
+          let q = garageSalesWithNid();
+          if (where) q = q.where(where);
+          return q.orderBy(sql`created_at DESC`).limit(input?.limit ?? 200);
+        };
+
+        let raw = await buildQuery(input?.city).all();
+        // If the requested city returned nothing but we just scraped a different
+        // city, surface those rows instead so they aren't invisible to the UI.
+        if (raw.length === 0 && input?.city && lastScrapedCityWithRows && lastScrapedCityWithRows !== input.city) {
+          raw = await buildQuery(lastScrapedCityWithRows).all();
+        }
         const rows = raw.map(reshapeGarageSale);
         return { rows, sales: rows, total: rows.length };
       }),
@@ -401,7 +416,10 @@ export const appRouter = router({
                 })
                 .onConflictDoNothing()
                 .run();
-              if (r?.changes) newListings++;
+              if (r?.changes) {
+                newListings++;
+                lastScrapedCityWithRows = city;
+              }
             } catch {}
           }
 
@@ -437,12 +455,15 @@ export const appRouter = router({
                   })
                   .onConflictDoNothing()
                   .run();
-                if (r?.changes) newListings++;
+                if (r?.changes) {
+                  newListings++;
+                  lastScrapedCityWithRows = city;
+                }
               } catch {}
             }
           }
         }
-        return { newListings, sources: Array.from(new Set(sources)) };
+        return { newListings, sources: Array.from(new Set(sources)), city: lastScrapedCityWithRows };
       }),
 
     update: publicProcedure
