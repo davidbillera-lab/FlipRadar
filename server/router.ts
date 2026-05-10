@@ -418,7 +418,7 @@ export const appRouter = router({
                 .run();
               if (r?.changes) {
                 newListings++;
-                lastScrapedCityWithRows = city;
+                lastScrapedCityWithRows = s.city;
               }
             } catch {}
           }
@@ -457,7 +457,7 @@ export const appRouter = router({
                   .run();
                 if (r?.changes) {
                   newListings++;
-                  lastScrapedCityWithRows = city;
+                  lastScrapedCityWithRows = s.city;
                 }
               } catch {}
             }
