@@ -14,11 +14,44 @@ import {
 import { geocodeAddress } from "./services/geocode.js";
 import { randomUUID } from "node:crypto";
 
-// Tracks the most recent city to produce rows during a scrape run.
-// `garageSales.list` falls back to this when the requested city has no rows,
-// so that scraping a non-default city makes those rows visible in a dashboard
-// that's hard-coded to the default city.
-let lastScrapedCityWithRows: string | null = null;
+// Tracks the most recent city to produce rows during a scrape run, persisted
+// in the `settings` table so it survives server restarts. `garageSales.list`
+// falls back to this when the requested city has no rows, so that scraping
+// a non-default city makes those rows visible in a dashboard that's hard-coded
+// to the default city.
+const LAST_SCRAPED_CITY_KEY = "lastScrapedCityWithRows";
+
+function getLastScrapedCity(): string | null {
+  try {
+    const row: any = db
+      .select()
+      .from(schema.settings)
+      .where(eq(schema.settings.key, LAST_SCRAPED_CITY_KEY))
+      .get();
+    if (!row?.value) return null;
+    try {
+      return JSON.parse(row.value);
+    } catch {
+      return row.value;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function setLastScrapedCity(city: string) {
+  try {
+    db.insert(schema.settings)
+      .values({ key: LAST_SCRAPED_CITY_KEY, value: JSON.stringify(city) })
+      .onConflictDoUpdate({
+        target: schema.settings.key,
+        set: { value: JSON.stringify(city) },
+      })
+      .run();
+  } catch (e) {
+    console.warn(`[router] failed to persist lastScrapedCity: ${(e as Error).message}`);
+  }
+}
 
 const CATEGORIES = ["electronics", "antiques", "collectibles", "power_tools"] as const;
 const LOCAL_USER = { id: "local", name: "Local User", email: "local@flipradar.local" };
@@ -328,9 +361,15 @@ export const appRouter = router({
           .optional(),
       )
       .query(async ({ input }) => {
+        // Match cities case-insensitively, ignoring punctuation/whitespace so
+        // input "highlands ranch" matches stored values like "(Highlands Ranch)"
+        // or "Highlands Ranch, CO".
         const buildQuery = (city?: string) => {
           const conds: SQL[] = [];
-          if (city) conds.push(eq(schema.garageSales.city, city));
+          if (city) {
+            const needle = `%${city.toLowerCase().replace(/[^a-z0-9]+/g, "%")}%`;
+            conds.push(sql`LOWER(${schema.garageSales.city}) LIKE ${needle}`);
+          }
           if (input?.status && input.status !== "all") conds.push(eq(schema.garageSales.status, input.status));
           const where = conds.length ? and(...conds) : undefined;
           let q = garageSalesWithNid();
@@ -341,8 +380,9 @@ export const appRouter = router({
         let raw = await buildQuery(input?.city).all();
         // If the requested city returned nothing but we just scraped a different
         // city, surface those rows instead so they aren't invisible to the UI.
-        if (raw.length === 0 && input?.city && lastScrapedCityWithRows && lastScrapedCityWithRows !== input.city) {
-          raw = await buildQuery(lastScrapedCityWithRows).all();
+        const lastCity = getLastScrapedCity();
+        if (raw.length === 0 && input?.city && lastCity && lastCity !== input.city) {
+          raw = await buildQuery(lastCity).all();
         }
         const rows = raw.map(reshapeGarageSale);
         return { rows, sales: rows, total: rows.length };
@@ -368,10 +408,28 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         const cities = input?.cities ?? [process.env.SCRAPER_CITY ?? "denver"];
         const sources: string[] = [];
+        const warnings: string[] = [];
+        const perCity: Array<{
+          city: string;
+          scraped: number;
+          inserted: number;
+          duplicates: number;
+          withCoords: number;
+        }> = [];
         let newListings = 0;
+        const mapsKeyMissing = !process.env.GOOGLE_MAPS_API_KEY;
+        if (mapsKeyMissing) {
+          warnings.push("GOOGLE_MAPS_API_KEY not set — sales will be saved without coordinates and won't appear on the map");
+        }
 
         for (const city of cities) {
+          const cityStats = { city, scraped: 0, inserted: 0, duplicates: 0, withCoords: 0 };
+          perCity.push(cityStats);
           const cl = await scrapeCraigslistGarageSales(city);
+          cityStats.scraped += cl.length;
+          if (cl.length === 0) {
+            warnings.push(`Craigslist returned 0 listings for "${city}" (subdomain may be unmapped or empty right now)`);
+          }
           if (cl.length) sources.push("Craigslist");
 
           for (const s of cl) {
@@ -418,13 +476,20 @@ export const appRouter = router({
                 .run();
               if (r?.changes) {
                 newListings++;
-                lastScrapedCityWithRows = s.city;
+                cityStats.inserted++;
+                if (lat != null && lng != null) cityStats.withCoords++;
+                setLastScrapedCity(s.city);
+              } else {
+                cityStats.duplicates++;
               }
-            } catch {}
+            } catch (e) {
+              warnings.push(`insert failed for ${s.sourceUrl}: ${(e as Error).message}`);
+            }
           }
 
           if (input?.includeEstateSales) {
             const es = await scrapeEstateSalesNet(city);
+            cityStats.scraped += es.length;
             if (es.length) sources.push("EstateSales.net");
             for (const s of es) {
               let lat = s.lat;
@@ -457,13 +522,34 @@ export const appRouter = router({
                   .run();
                 if (r?.changes) {
                   newListings++;
-                  lastScrapedCityWithRows = s.city;
+                  cityStats.inserted++;
+                  if (lat != null && lng != null) cityStats.withCoords++;
+                  setLastScrapedCity(s.city);
+                } else {
+                  cityStats.duplicates++;
                 }
-              } catch {}
+              } catch (e) {
+                warnings.push(`insert failed for ${s.sourceUrl}: ${(e as Error).message}`);
+              }
             }
           }
         }
-        return { newListings, sources: Array.from(new Set(sources)), city: lastScrapedCityWithRows };
+        // Promote unmapped-subdomain hints into warnings.
+        for (const c of perCity) {
+          if (c.scraped > 0 && c.inserted === 0 && c.duplicates === c.scraped) {
+            warnings.push(`"${c.city}": all ${c.scraped} listings already in DB (re-scrape produced no new rows)`);
+          }
+          if (c.inserted > 0 && c.withCoords === 0 && !mapsKeyMissing) {
+            warnings.push(`"${c.city}": inserted ${c.inserted} rows but none had coordinates (no address in posting or geocode failed)`);
+          }
+        }
+        return {
+          newListings,
+          sources: Array.from(new Set(sources)),
+          city: getLastScrapedCity(),
+          perCity,
+          warnings,
+        };
       }),
 
     update: publicProcedure

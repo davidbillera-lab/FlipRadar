@@ -25,6 +25,42 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
+// Quick config self-check for the user — visit /api/diagnostics in a browser.
+app.get("/api/diagnostics", async (_req, res) => {
+  const features = {
+    googleMaps: Boolean(process.env.GOOGLE_MAPS_API_KEY),
+    anthropic: Boolean(process.env.ANTHROPIC_API_KEY),
+    ebay: Boolean(process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET),
+    telegram: Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+  };
+  let dbCounts: Record<string, number> = {};
+  try {
+    const allSales = await db.select().from(schema.garageSales).all();
+    const allDeals = await db.select().from(schema.deals).all();
+    dbCounts = {
+      garageSales: allSales.length,
+      garageSalesWithCoords: allSales.filter((s) => s.lat != null && s.lng != null).length,
+      deals: allDeals.length,
+      dealsScored: allDeals.filter((d) => d.score != null).length,
+      dealsFlagged: allDeals.filter((d) => d.flaggedHighRoi).length,
+    };
+  } catch {
+    dbCounts = { error: 0 };
+  }
+  res.json({
+    ok: true,
+    features,
+    dbCounts,
+    cron: process.env.SCRAPER_CRON ?? "*/30 * * * *",
+    defaultCity: process.env.SCRAPER_CITY ?? "denver",
+    notes: [
+      features.googleMaps ? null : "GOOGLE_MAPS_API_KEY missing — map pins and route planner won't work",
+      features.anthropic ? null : "ANTHROPIC_API_KEY missing — deal scorer can't identify products",
+      features.ebay ? null : "EBAY_CLIENT_ID/SECRET missing — deals will have no ROI scores",
+    ].filter(Boolean),
+  });
+});
+
 // Manus OAuth callback — just redirect home; auth.me returns a local user so no re-redirect.
 app.get("/api/oauth/callback", (_req, res) => res.redirect("/"));
 
@@ -153,4 +189,23 @@ if (cronExpr && cron.validate(cronExpr)) {
 
 app.listen(PORT, () => {
   console.log(`FlipRadar listening on http://localhost:${PORT}`);
+  printConfigAudit();
 });
+
+function printConfigAudit() {
+  const ok = (label: string) => console.log(`  [✓] ${label}`);
+  const miss = (label: string, why: string) => console.log(`  [ ] ${label} — ${why}`);
+  console.log("Integrations:");
+  process.env.GOOGLE_MAPS_API_KEY
+    ? ok("Google Maps (geocoding + map pins)")
+    : miss("Google Maps", "GOOGLE_MAPS_API_KEY not set; garage sales will have no coords and won't appear on the map");
+  process.env.ANTHROPIC_API_KEY
+    ? ok("Anthropic (LLM product identification)")
+    : miss("Anthropic", "ANTHROPIC_API_KEY not set; deal scorer can't extract product info");
+  process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET
+    ? ok("eBay Browse API (comp pricing)")
+    : miss("eBay", "EBAY_CLIENT_ID/SECRET not set; deals will have no ROI scores");
+  process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
+    ? ok("Telegram alerts")
+    : miss("Telegram", "optional — no alerts on high-ROI flags");
+}
