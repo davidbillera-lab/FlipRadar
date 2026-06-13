@@ -35,7 +35,22 @@ export function formatDealAlert(deal: {
   score: number | null;
   sourceUrl: string;
   city?: string | null;
+  compConfidence?: "high" | "medium" | "low";
+  compCount?: number;
 }): string {
+  // Surface how much to trust the ROI: real eBay sold comps, with sample size.
+  const confIcon =
+    deal.compConfidence === "high"
+      ? "🟢"
+      : deal.compConfidence === "medium"
+        ? "🟡"
+        : "🔴";
+  const compLine =
+    deal.compConfidence && deal.ebayAvgSold
+      ? `Comp confidence: ${confIcon} ${deal.compConfidence}${
+          deal.compCount ? ` (${deal.compCount} sold)` : ""
+        }`
+      : "";
   const lines = [
     `*High-ROI Deal Found* — Score ${deal.score ?? "?"}/100`,
     `*${deal.title}*`,
@@ -44,6 +59,7 @@ export function formatDealAlert(deal: {
     deal.netProfit !== null
       ? `Net Profit: $${deal.netProfit.toFixed(0)} (ROI ${deal.roiPct?.toFixed(0) ?? "?"}%)`
       : "",
+    compLine,
     `[View Listing](${deal.sourceUrl})`,
   ].filter(Boolean);
   return lines.join("\n");

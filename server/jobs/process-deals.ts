@@ -40,6 +40,8 @@ export async function processUnscoredDeals(): Promise<{ processed: number; flagg
       const score = scoreDeal({
         askingPrice: deal.askingPrice,
         ebayAvgSold: comps.avgPrice || null,
+        ebayMedianSold: comps.medianPrice || null,
+        compCount: comps.count,
         category: ident.category === "other" ? deal.category : ident.category,
         llmConfidence: ident.confidence,
       });
@@ -79,6 +81,8 @@ export async function processUnscoredDeals(): Promise<{ processed: number; flagg
             score: score.score,
             sourceUrl: deal.sourceUrl,
             city: deal.city,
+            compConfidence: score.compConfidence,
+            compCount: score.compCount,
           }),
         );
       }

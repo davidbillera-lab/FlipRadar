@@ -1,46 +1,7 @@
 import { request } from "undici";
 
-const EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token";
-const EBAY_BROWSE_BASE = "https://api.ebay.com/buy/browse/v1";
-
-let cachedToken: { token: string; expiresAt: number } | null = null;
-
-async function getAppAccessToken(): Promise<string> {
-  if (cachedToken && cachedToken.expiresAt > Date.now() + 30_000) {
-    return cachedToken.token;
-  }
-  const clientId = process.env.EBAY_CLIENT_ID;
-  const clientSecret = process.env.EBAY_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    throw new Error(
-      "eBay credentials missing. Set EBAY_CLIENT_ID and EBAY_CLIENT_SECRET in .env",
-    );
-  }
-  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    scope: "https://api.ebay.com/oauth/api_scope",
-  }).toString();
-
-  const res = await request(EBAY_OAUTH_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basic}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
-  });
-  if (res.statusCode !== 200) {
-    const txt = await res.body.text();
-    throw new Error(`eBay OAuth failed: ${res.statusCode} ${txt}`);
-  }
-  const json = (await res.body.json()) as { access_token: string; expires_in: number };
-  cachedToken = {
-    token: json.access_token,
-    expiresAt: Date.now() + json.expires_in * 1000,
-  };
-  return cachedToken.token;
-}
+const DEFAULT_COMPS_URL =
+  "https://dmtctlpzlfpcogpjweuv.supabase.co/functions/v1/ebay-sold-comps";
 
 export interface EbayComp {
   itemId: string;
@@ -49,6 +10,7 @@ export interface EbayComp {
   currency: string;
   condition?: string;
   itemWebUrl: string;
+  soldDate?: string;
 }
 
 export interface EbayCompResult {
@@ -57,78 +19,66 @@ export interface EbayCompResult {
   medianPrice: number;
   count: number;
   listings: EbayComp[];
+  dataSource?: "ebay_sold";
+  cached?: boolean;
 }
 
 /**
- * Browse API only returns active listings. We use these as a proxy for "comps":
- * the median active price is generally a conservative estimate of sold price.
+ * Thin client of the portfolio-shared `ebay-sold-comps` edge function in Mission
+ * Control (Supabase dmtctlpzlfpcogpjweuv). Returns real eBay **SOLD** prices, not
+ * active/asking prices — so ROI is believable. The trimmed-mean/median math and
+ * 7-day caching now live server-side in the edge function; FlipRadar just consumes
+ * the aggregates. One data source, many consumers (FlipRadar + VZT).
+ *
+ * Contract: personal-os/docs/shared-services/ebay-sold-comps.md
  */
 export async function lookupEbayComps(query: string, limit = 20): Promise<EbayCompResult> {
-  const token = await getAppAccessToken();
-  const marketplace = process.env.EBAY_MARKETPLACE_ID ?? "EBAY_US";
-  const url = new URL(`${EBAY_BROWSE_BASE}/item_summary/search`);
-  url.searchParams.set("q", query);
-  url.searchParams.set("limit", String(limit));
-  url.searchParams.set("filter", "buyingOptions:{FIXED_PRICE},conditionIds:{1000|1500|2000|2500|3000|4000|5000}");
-  url.searchParams.set("sort", "price");
-
-  const res = await request(url.toString(), {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "X-EBAY-C-MARKETPLACE-ID": marketplace,
-      "Content-Type": "application/json",
-    },
-  });
-  if (res.statusCode !== 200) {
-    const txt = await res.body.text();
-    throw new Error(`eBay search failed: ${res.statusCode} ${txt}`);
-  }
-  const data = (await res.body.json()) as {
-    itemSummaries?: Array<{
-      itemId: string;
-      title: string;
-      price?: { value: string; currency: string };
-      condition?: string;
-      itemWebUrl: string;
-    }>;
+  const url = process.env.EBAY_COMPS_SERVICE_URL ?? DEFAULT_COMPS_URL;
+  const token = process.env.EBAY_COMPS_SERVICE_TOKEN;
+  const empty: EbayCompResult = {
+    query,
+    avgPrice: 0,
+    medianPrice: 0,
+    count: 0,
+    listings: [],
+    dataSource: "ebay_sold",
   };
 
-  const listings: EbayComp[] = (data.itemSummaries ?? [])
-    .filter((it) => it.price?.value)
-    .map((it) => ({
-      itemId: it.itemId,
-      title: it.title,
-      price: Number(it.price!.value),
-      currency: it.price!.currency,
-      condition: it.condition,
-      itemWebUrl: it.itemWebUrl,
-    }));
-
-  if (listings.length === 0) {
-    return { query, avgPrice: 0, medianPrice: 0, count: 0, listings: [] };
+  if (!token) {
+    throw new Error(
+      "Sold-comps service token missing. Set EBAY_COMPS_SERVICE_TOKEN in .env",
+    );
   }
 
-  // Drop top/bottom 10% to reduce outlier influence
-  const sorted = [...listings].sort((a, b) => a.price - b.price);
-  const trim = Math.floor(sorted.length * 0.1);
-  const trimmed = sorted.slice(trim, sorted.length - trim);
-  const sum = trimmed.reduce((acc, l) => acc + l.price, 0);
-  const avgPrice = trimmed.length > 0 ? sum / trimmed.length : 0;
-  const mid = Math.floor(trimmed.length / 2);
-  const medianPrice =
-    trimmed.length === 0
-      ? 0
-      : trimmed.length % 2 === 0
-        ? ((trimmed[mid - 1]?.price ?? 0) + (trimmed[mid]?.price ?? 0)) / 2
-        : (trimmed[mid]?.price ?? 0);
+  const res = await request(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query, limit }),
+  });
+
+  if (res.statusCode !== 200) {
+    const txt = await res.body.text();
+    throw new Error(`ebay-sold-comps failed: ${res.statusCode} ${txt}`);
+  }
+
+  const data = (await res.body.json()) as Partial<EbayCompResult>;
+  const listings: EbayComp[] = Array.isArray(data.listings) ? data.listings : [];
+
+  if (!data.count || data.count <= 0) {
+    return empty;
+  }
 
   return {
-    query,
-    avgPrice: Number(avgPrice.toFixed(2)),
-    medianPrice: Number(medianPrice.toFixed(2)),
-    count: listings.length,
-    listings: listings.slice(0, 5),
+    query: data.query ?? query,
+    avgPrice: Number((data.avgPrice ?? 0).toFixed(2)),
+    medianPrice: Number((data.medianPrice ?? 0).toFixed(2)),
+    count: data.count,
+    listings,
+    dataSource: "ebay_sold",
+    cached: data.cached,
   };
 }
 
