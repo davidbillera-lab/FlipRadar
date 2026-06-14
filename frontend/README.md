@@ -1,36 +1,55 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# FlipRadar — Next.js Frontend
 
-## Getting Started
+This is the editable Next.js frontend for FlipRadar. It connects to the Express/tRPC backend via `NEXT_PUBLIC_API_URL`.
 
-First, run the development server:
+## Dev setup (two-process)
 
+The backend (Express) and frontend (Next.js) run on separate ports in development.
+
+**Terminal 1 — Backend (Express + tRPC, port 3001):**
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# from repo root
+PORT=3001 npm start
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+**Terminal 2 — Frontend (Next.js, port 3000):**
+```bash
+cd frontend
+npm run dev
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Open [http://localhost:3000](http://localhost:3000) in a browser.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Environment variables
 
-## Learn More
+Create `frontend/.env.local` (gitignored) with:
 
-To learn more about Next.js, take a look at the following resources:
+```env
+NEXT_PUBLIC_API_URL=http://localhost:3001
+NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=<your key from root .env>
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+In production, set these in your hosting environment (e.g. Vercel env config). `NEXT_PUBLIC_API_URL` must point at the deployed Express server URL.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Pages
 
-## Deploy on Vercel
+| Route | Description |
+|---|---|
+| `/` | Dashboard — deal list with scores and comp badges |
+| `/deal/[id]` | Deal detail — comps, ROI, tracking form |
+| `/garage-sales` | Garage sales map + list |
+| `/tracking` | Purchased/sold deal tracker |
+| `/settings` | Scoring thresholds, scraper cities |
+| `/route` | Route planner — optimized driving order for garage sales |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Build
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+cd frontend
+npm run build
+```
+
+Lint + type-check:
+```bash
+npm run lint
+npx tsc --noEmit
