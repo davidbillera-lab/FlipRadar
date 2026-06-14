@@ -90,6 +90,10 @@ export default function GarageSalesPage() {
     const bounds = new window.google.maps.LatLngBounds();
     let hasBounds = false;
 
+    const esc = (s: string) =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const safeHref = (url: string) => (/^https?:\/\//.test(url) ? url : "#");
+
     filtered.forEach((sale) => {
       if (sale.lat == null || sale.lng == null) return;
       const pos = { lat: sale.lat, lng: sale.lng };
@@ -99,7 +103,7 @@ export default function GarageSalesPage() {
         title: sale.title,
       });
       const infoWindow = new window.google.maps.InfoWindow({
-        content: `<div style="max-width:220px"><strong>${sale.title}</strong><br/>${sale.address ?? sale.city}<br/><a href="${sale.sourceUrl}" target="_blank" rel="noopener">View listing →</a></div>`,
+        content: `<div style="max-width:220px"><strong>${esc(sale.title)}</strong><br/>${esc(sale.address ?? sale.city)}<br/><a href="${safeHref(sale.sourceUrl)}" target="_blank" rel="noopener">View listing →</a></div>`,
       });
       marker.addListener("click", () => {
         infoWindow.open(mapInstanceRef.current, marker);
