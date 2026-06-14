@@ -29,7 +29,7 @@ the JSG estate-liquidation parent. Tier 2 (active build with exit potential).
 - **Comps:** eBay **sold** prices via the shared Mission Control `ebay-sold-comps` endpoint (see below).
 - **Alerts:** Telegram bot.
 - **Cron:** `node-cron` on a configurable schedule.
-- **Frontend:** compiled React/Vite SPA bundle (`src/index-*.js`) — **no source in repo** (see Known Debt).
+- **Frontend:** Next.js 14 App Router (`frontend/`) — editable source in repo. Deployed as a separate process from the Express backend. See `frontend/README.md` for dev setup.
 
 ### Shared sold-comps service (the data backbone)
 
@@ -48,11 +48,15 @@ FlipRadar does **not** run its own eBay scraper. It is a **thin client** of the 
 
 ## Known Debt / Risks (acquisition lens)
 
-1. **Frontend is a black box.** Only a compiled Vite bundle exists; `server/index.ts` even rewrites URLs
-   inside the bundle at runtime. Un-editable UI is an acquisition red flag → Phase 2 rebuilds it in Next.js.
-2. **Single-tenant.** Hardcoded local-user auth stub (`auth.me` in `server/router.ts`) → Phase 4 moves to
+1. **Phase 2 complete — frontend is editable source.** Next.js 14 App Router lives in `frontend/`;
+   the compiled Vite black-box and bundle-rewrite hack are retired. No longer an acquisition red flag.
+2. **AppRouter type coupling (minor).** `frontend/lib/trpc.ts` imports `AppRouter` from `../../server/router`
+   via a relative path outside `frontend/tsconfig.json`'s `include`. Works for local dev and Vercel (types
+   only, not compiled into the bundle), but a formal monorepo boundary (shared `types/` package) would be
+   cleaner — deferred to Phase 4.
+3. **Single-tenant.** Hardcoded local-user auth stub (`auth.me` in `server/router.ts`) → Phase 4 moves to
    Supabase auth + Stripe billing.
-3. **Facebook Marketplace** is a stub (`server/services/scraper.ts:~298`) — no clean unauthenticated path;
+4. **Facebook Marketplace** is a stub (`server/services/scraper.ts:~298`) — no clean unauthenticated path;
    decision gate in Phase 3 (extension vs paid scraper vs Playwright).
 
 See `decisions.md` for the full phased plan and `kill-criteria.md` for when to stop.
@@ -73,3 +77,4 @@ See `decisions.md` for the full phased plan and `kill-criteria.md` for when to s
 ## Last Updated
 
 2026-06-13 — Scaffolding added; comps rewired to shared MC sold-comps service.
+2026-06-13 — Phase 2 complete: Next.js frontend in `frontend/`; Vite bundle + rewrite hack retired; XSS fix; port defaults corrected; tsconfig isolated.
