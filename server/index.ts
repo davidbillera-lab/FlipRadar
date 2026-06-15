@@ -8,9 +8,12 @@ import cron from "node-cron";
 // (e.g. services/geocode.ts) prepares statements at its own module load.
 import { runMigrations } from "./db/migrate.js";
 import { appRouter } from "./router.js";
-import { processUnscoredDeals } from "./jobs/process-deals.js";
+import { processUnscoredDeals, processFmListings } from "./jobs/process-deals.js";
 import { db, schema } from "./db/index.js";
 import { optimizeRoute } from "./services/route.js";
+import { scrapeCity, upsertListings, getStaleCity } from "./services/fm-scraper.js";
+import { resolveScraperCities } from "./lib/cities.js";
+import { eq } from "drizzle-orm";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const app = express();
@@ -97,6 +100,59 @@ if (cronExpr && cron.validate(cronExpr)) {
   });
   console.log(`[cron] auto-scoring every: ${cronExpr}`);
 }
+
+// FM scraper cron — runs once per hour, scrapes the next stale city
+cron.schedule("0 * * * *", async () => {
+  try {
+    const cities = await resolveScraperCities();
+    const jobs = await db.select().from(schema.fmScrapeJobs).all();
+    const city = getStaleCity(cities, jobs);
+    if (!city) {
+      console.log("[fm-cron] no stale city to scrape");
+      return;
+    }
+
+    // Mark as running
+    await db
+      .update(schema.fmScrapeJobs)
+      .set({ status: "running", errorMsg: null })
+      .where(eq(schema.fmScrapeJobs.city, city))
+      .run();
+
+    try {
+      const listings = await scrapeCity(city);
+      await upsertListings(city, listings);
+      await db
+        .update(schema.fmScrapeJobs)
+        .set({
+          status: "done",
+          lastScrapedAt: new Date(),
+          listingsFound: listings.length,
+          errorMsg: null,
+        })
+        .where(eq(schema.fmScrapeJobs.city, city))
+        .run();
+      console.log(`[fm-cron] scraped ${listings.length} listings for ${city}`);
+    } catch (e) {
+      await db
+        .update(schema.fmScrapeJobs)
+        .set({ status: "error", errorMsg: (e as Error).message })
+        .where(eq(schema.fmScrapeJobs.city, city))
+        .run();
+      console.error(`[fm-cron] scrape error for ${city}:`, (e as Error).message);
+    }
+
+    // Process new FM listings into the deals pipeline regardless of scrape outcome
+    try {
+      await processFmListings();
+    } catch (e) {
+      console.error("[fm-cron] processFmListings error:", (e as Error).message);
+    }
+  } catch (e) {
+    console.error("[fm-cron] error:", (e as Error).message);
+  }
+});
+console.log("[cron] FM scraper: hourly (0 * * * *)");
 
 app.listen(PORT, () => {
   console.log(`FlipRadar listening on http://localhost:${PORT}`);
