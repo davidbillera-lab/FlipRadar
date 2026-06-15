@@ -3,7 +3,8 @@ import { router, publicProcedure } from "./trpc.js";
 import { db, schema } from "./db/index.js";
 import { eq, sql, and, getTableColumns, type SQL } from "drizzle-orm";
 import { resolveScraperCities } from "./lib/cities.js";
-import { processUnscoredDeals, getDealStats, rescoreHighRoiFlags } from "./jobs/process-deals.js";
+import { processUnscoredDeals, getDealStats, rescoreHighRoiFlags, processFmListings } from "./jobs/process-deals.js";
+import { scrapeCity, upsertListings } from "./services/fm-scraper.js";
 import {
   scrapeCraigslist,
   scrapeCraigslistGarageSales,
@@ -432,6 +433,22 @@ export const appRouter = router({
           await db.update(schema.garageSales).set(patch).where(sql`rowid = ${input.id}`).run();
         }
         return { ok: true };
+      }),
+  }),
+
+  fm: router({
+    scrapeStatus: publicProcedure.query(async () => {
+      const jobs = await db.select().from(schema.fmScrapeJobs).all();
+      return jobs;
+    }),
+
+    triggerScrape: publicProcedure
+      .input(z.object({ city: z.string().min(1) }))
+      .mutation(async ({ input }) => {
+        const listings = await scrapeCity(input.city);
+        const inserted = await upsertListings(input.city, listings);
+        await processFmListings();
+        return { ok: true, listingsFound: listings.length, inserted };
       }),
   }),
 
