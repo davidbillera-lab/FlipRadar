@@ -37,6 +37,8 @@ type Stats = {
 };
 
 const CATEGORIES = ["all", "electronics", "antiques", "collectibles", "power_tools"] as const;
+const PLATFORMS = ["all", "craigslist", "estatesales", "facebook"] as const;
+type Platform = typeof PLATFORMS[number];
 
 function fmt(n: number | null | undefined, prefix = "") {
   if (n == null) return "—";
@@ -61,6 +63,7 @@ export default function Dashboard() {
   const [deals, setDeals] = useState<DealRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [category, setCategory] = useState<string>("all");
+  const [platform, setPlatform] = useState<Platform>("all");
   const [highRoiOnly, setHighRoiOnly] = useState(false);
 
   useEffect(() => {
@@ -85,6 +88,7 @@ export default function Dashboard() {
   const filtered = deals.filter((row) => {
     if (!row) return false;
     if (category !== "all" && row.deal.category !== category) return false;
+    if (platform !== "all" && row.deal.platform !== platform) return false;
     if (highRoiOnly && !row.deal.flaggedHighRoi) return false;
     return true;
   });
@@ -127,6 +131,23 @@ export default function Dashboard() {
         <span className="ml-auto text-xs text-zinc-400">{filtered.length} deals</span>
       </div>
 
+      {/* Platform filter chips */}
+      <div className="flex flex-wrap items-center gap-2">
+        {PLATFORMS.map((p) => (
+          <button
+            key={p}
+            onClick={() => setPlatform(p)}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+              platform === p
+                ? "bg-zinc-900 text-white"
+                : "bg-white border border-zinc-200 text-zinc-600 hover:border-zinc-400"
+            }`}
+          >
+            {p === "all" ? "All platforms" : p === "estatesales" ? "EstateSales" : p === "facebook" ? "Facebook" : "Craigslist"}
+          </button>
+        ))}
+      </div>
+
       {/* Deal cards */}
       {loading ? (
         <p className="text-sm text-zinc-400">Loading deals…</p>
@@ -164,6 +185,11 @@ function DealCard({ row }: { row: NonNullable<DealRow> }) {
 
       <div className="flex items-center gap-3 text-xs text-zinc-500">
         <span>{deal.platform ?? "unknown"}</span>
+        {deal.platform === "facebook" && (
+          <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+            FB Marketplace
+          </span>
+        )}
         {deal.city && <span>· {deal.city}</span>}
         {score.exitChannel && <span>· {score.exitChannel}</span>}
       </div>
