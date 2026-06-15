@@ -1,5 +1,6 @@
 import { db, schema } from "../db/index.js";
 import { eq, isNull, or, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { identifyProduct } from "../services/llm.js";
 import { lookupEbayComps } from "../services/ebay.js";
 import { scoreDeal } from "../scoring.js";
@@ -130,6 +131,73 @@ export async function rescoreHighRoiFlags(): Promise<{
   }
 
   return { reviewed: scored.length, newlyFlagged, unflagged };
+}
+
+/**
+ * Bridges unprocessed FM listings into the deals table so they ride the
+ * existing identify → eBay comps → score → alert pipeline.
+ * Does NOT run identification or scoring itself — processUnscoredDeals() handles that.
+ */
+export async function processFmListings(): Promise<{ processed: number }> {
+  const listings = await db
+    .select()
+    .from(schema.fmListings)
+    .where(eq(schema.fmListings.processed, false))
+    .limit(50)
+    .all();
+
+  let processed = 0;
+
+  for (const listing of listings) {
+    try {
+      // priceCents is nullable; skip listings with no price (can't score)
+      const askingPrice =
+        listing.priceCents != null ? listing.priceCents / 100 : null;
+
+      if (askingPrice == null) {
+        // Mark processed so we don't retry no-price listings every run
+        await db
+          .update(schema.fmListings)
+          .set({ processed: true })
+          .where(eq(schema.fmListings.id, listing.id))
+          .run();
+        continue;
+      }
+
+      const images: string[] = Array.isArray(listing.images) ? listing.images : [];
+      const imageUrl = images[0] ?? null;
+
+      const r: any = await db
+        .insert(schema.deals)
+        .values({
+          id: randomUUID(),
+          platform: "facebook",
+          sourceUrl: listing.sourceUrl,
+          title: listing.title,
+          description: listing.description ?? null,
+          city: listing.city,
+          askingPrice,
+          imageUrl,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .onConflictDoNothing()
+        .run();
+
+      // Whether we inserted or skipped (conflict), mark FM listing as processed
+      await db
+        .update(schema.fmListings)
+        .set({ processed: true })
+        .where(eq(schema.fmListings.id, listing.id))
+        .run();
+
+      if (r?.changes) processed++;
+    } catch (e) {
+      console.error(`[process-fm] failed for ${listing.id}:`, (e as Error).message);
+    }
+  }
+
+  return { processed };
 }
 
 export async function getDealStats() {
