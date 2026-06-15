@@ -36,6 +36,31 @@ CREATE TABLE IF NOT EXISTS geocode_cache (
   formatted TEXT,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS fm_listings (
+  id TEXT PRIMARY KEY,
+  city TEXT NOT NULL,
+  title TEXT NOT NULL,
+  price_cents INTEGER,
+  location_text TEXT,
+  source_url TEXT NOT NULL,
+  description TEXT,
+  images TEXT DEFAULT '[]',
+  posted_at INTEGER,
+  scraped_at INTEGER NOT NULL,
+  processed INTEGER DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fm_listings_source_url ON fm_listings(source_url);
+CREATE INDEX IF NOT EXISTS idx_fm_listings_city_scraped ON fm_listings(city, scraped_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fm_listings_processed ON fm_listings(processed);
+
+CREATE TABLE IF NOT EXISTS fm_scrape_jobs (
+  city TEXT PRIMARY KEY,
+  last_scraped_at INTEGER,
+  status TEXT DEFAULT 'pending',
+  listings_found INTEGER DEFAULT 0,
+  error_msg TEXT
+);
 `;
 
 const ALTER_SQL = [

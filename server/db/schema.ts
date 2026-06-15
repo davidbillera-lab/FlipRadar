@@ -61,7 +61,31 @@ export const geocodeCache = sqliteTable("geocode_cache", {
   createdAt: integer("created_at").notNull(),
 });
 
+export const fmListings = sqliteTable("fm_listings", {
+  id: text("id").primaryKey(),
+  city: text("city").notNull(),
+  title: text("title").notNull(),
+  priceCents: integer("price_cents"),
+  locationText: text("location_text"),
+  sourceUrl: text("source_url").notNull(),
+  description: text("description"),
+  images: text("images", { mode: "json" }).$type<string[]>().default([]),
+  postedAt: integer("posted_at", { mode: "timestamp" }),
+  scrapedAt: integer("scraped_at", { mode: "timestamp" }).notNull(),
+  processed: integer("processed", { mode: "boolean" }).default(false),
+});
+
+export const fmScrapeJobs = sqliteTable("fm_scrape_jobs", {
+  city: text("city").primaryKey(),
+  lastScrapedAt: integer("last_scraped_at", { mode: "timestamp" }),
+  status: text("status").default("pending"),
+  listingsFound: integer("listings_found").default(0),
+  errorMsg: text("error_msg"),
+});
+
 export type Deal = typeof deals.$inferSelect;
 export type NewDeal = typeof deals.$inferInsert;
 export type GarageSale = typeof garageSales.$inferSelect;
 export type NewGarageSale = typeof garageSales.$inferInsert;
+export type FmListing = typeof fmListings.$inferSelect;
+export type FmScrapeJob = typeof fmScrapeJobs.$inferSelect;
