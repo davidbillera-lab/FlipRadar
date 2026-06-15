@@ -1,5 +1,3 @@
-export async function lookupEbayComps(query: string) {
-  console.log(`Searching eBay for: ${query}`);
-  // This logic was used to find sold listings and calculate average prices
-  return { avgPrice: 0, listings: [] };
-}
+// Re-export the real eBay Browse API client from the server module.
+export { lookupEbayComps, estimateEbayFees } from "../../server/services/ebay.js";
+export type { EbayComp, EbayCompResult } from "../../server/services/ebay.js";
