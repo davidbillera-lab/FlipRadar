@@ -112,32 +112,36 @@ cron.schedule("0 * * * *", async () => {
       return;
     }
 
-    // Mark as running
+    // Mark as running (upsert — row may not exist yet)
     await db
-      .update(schema.fmScrapeJobs)
-      .set({ status: "running", errorMsg: null })
-      .where(eq(schema.fmScrapeJobs.city, city))
+      .insert(schema.fmScrapeJobs)
+      .values({ city, status: "running", errorMsg: null })
+      .onConflictDoUpdate({
+        target: schema.fmScrapeJobs.city,
+        set: { status: "running", errorMsg: null },
+      })
       .run();
 
     try {
       const listings = await scrapeCity(city);
       await upsertListings(city, listings);
       await db
-        .update(schema.fmScrapeJobs)
-        .set({
-          status: "done",
-          lastScrapedAt: new Date(),
-          listingsFound: listings.length,
-          errorMsg: null,
+        .insert(schema.fmScrapeJobs)
+        .values({ city, status: "done", lastScrapedAt: new Date(), listingsFound: listings.length, errorMsg: null })
+        .onConflictDoUpdate({
+          target: schema.fmScrapeJobs.city,
+          set: { status: "done", lastScrapedAt: new Date(), listingsFound: listings.length, errorMsg: null },
         })
-        .where(eq(schema.fmScrapeJobs.city, city))
         .run();
       console.log(`[fm-cron] scraped ${listings.length} listings for ${city}`);
     } catch (e) {
       await db
-        .update(schema.fmScrapeJobs)
-        .set({ status: "error", errorMsg: (e as Error).message })
-        .where(eq(schema.fmScrapeJobs.city, city))
+        .insert(schema.fmScrapeJobs)
+        .values({ city, status: "error", errorMsg: (e as Error).message })
+        .onConflictDoUpdate({
+          target: schema.fmScrapeJobs.city,
+          set: { status: "error", errorMsg: (e as Error).message },
+        })
         .run();
       console.error(`[fm-cron] scrape error for ${city}:`, (e as Error).message);
     }

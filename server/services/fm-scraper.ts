@@ -2,7 +2,7 @@ import { request } from "undici";
 import { randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
 
-const APIFY_TOKEN = process.env.APIFY_API_TOKEN ?? "";
+const APIFY_TOKEN = process.env.APIFY_FACEBOOK_API_KEY ?? "";
 const ACTOR_ID = "apify~facebook-marketplace-scraper";
 const BASE = "https://api.apify.com/v2";
 const POLL_INTERVAL_MS = 5_000;
@@ -59,22 +59,24 @@ async function apifyPost(path: string, body: unknown) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  const text = await res.body.text();
   if (res.statusCode >= 400) {
-    throw new Error(`Apify ${path} returned ${res.statusCode}`);
+    throw new Error(`Apify POST ${path} returned ${res.statusCode}: ${text.slice(0, 300)}`);
   }
-  return JSON.parse(await res.body.text());
+  return JSON.parse(text);
 }
 
 async function apifyGet(path: string) {
   const res = await request(`${BASE}${path}?token=${APIFY_TOKEN}`, { method: "GET" });
+  const text = await res.body.text();
   if (res.statusCode >= 400) {
-    throw new Error(`Apify GET ${path} returned ${res.statusCode}`);
+    throw new Error(`Apify GET ${path} returned ${res.statusCode}: ${text.slice(0, 300)}`);
   }
-  return JSON.parse(await res.body.text());
+  return JSON.parse(text);
 }
 
 export async function scrapeCity(city: string, maxItems = 200): Promise<FmNormalizedListing[]> {
-  if (!APIFY_TOKEN) throw new Error("APIFY_API_TOKEN not set");
+  if (!APIFY_TOKEN) throw new Error("APIFY_FACEBOOK_API_KEY not set");
 
   // 1. Start run
   const runResp = await apifyPost(`/acts/${ACTOR_ID}/runs`, {

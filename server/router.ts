@@ -445,10 +445,36 @@ export const appRouter = router({
     triggerScrape: publicProcedure
       .input(z.object({ city: z.string().min(1) }))
       .mutation(async ({ input }) => {
-        const listings = await scrapeCity(input.city);
-        const inserted = await upsertListings(input.city, listings);
-        await processFmListings();
-        return { ok: true, listingsFound: listings.length, inserted };
+        const { city } = input;
+        await db
+          .insert(schema.fmScrapeJobs)
+          .values({ city, status: "running", errorMsg: null })
+          .onConflictDoUpdate({ target: schema.fmScrapeJobs.city, set: { status: "running", errorMsg: null } })
+          .run();
+        try {
+          const listings = await scrapeCity(city);
+          const inserted = await upsertListings(city, listings);
+          await db
+            .insert(schema.fmScrapeJobs)
+            .values({ city, status: "done", lastScrapedAt: new Date(), listingsFound: listings.length, errorMsg: null })
+            .onConflictDoUpdate({
+              target: schema.fmScrapeJobs.city,
+              set: { status: "done", lastScrapedAt: new Date(), listingsFound: listings.length, errorMsg: null },
+            })
+            .run();
+          await processFmListings();
+          return { ok: true, listingsFound: listings.length, inserted };
+        } catch (e) {
+          await db
+            .insert(schema.fmScrapeJobs)
+            .values({ city, status: "error", errorMsg: (e as Error).message })
+            .onConflictDoUpdate({
+              target: schema.fmScrapeJobs.city,
+              set: { status: "error", errorMsg: (e as Error).message },
+            })
+            .run();
+          throw e;
+        }
       }),
   }),
 
