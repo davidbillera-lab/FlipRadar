@@ -20,6 +20,15 @@ const app = express();
 
 app.use(express.json({ limit: "1mb" }));
 
+// Allow cross-origin requests from the Next.js dev server (port 3001) and any future frontend origin
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") { res.sendStatus(204); return; }
+  next();
+});
+
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
 // Manus OAuth callback — just redirect home; auth.me returns a local user so no re-redirect.
