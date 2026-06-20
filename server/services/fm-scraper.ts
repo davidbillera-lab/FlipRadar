@@ -155,8 +155,9 @@ export async function scrapeCity(
     try {
       const raw = await runActor(citySearchUrl(city, q), perQuery);
       for (const r of raw) {
-        // Skip the actor's "no_items" error rows and any sold/pending listings.
-        if (r.error || !r.itemUrl || r.isSold || r.isPending) continue;
+        // Skip the actor's "no_items" error rows, any sold/pending listings, and
+        // rows with a blank URL (an empty itemUrl would write an unresolvable ghost row).
+        if (r.error || !r.itemUrl?.trim() || r.isSold || r.isPending) continue;
         if (!byUrl.has(r.itemUrl)) byUrl.set(r.itemUrl, normalize(city, r));
       }
     } catch (e) {
@@ -164,7 +165,13 @@ export async function scrapeCity(
     }
   }
 
-  if (byUrl.size === 0 && errors.length === queries.length) {
+  // Surface partial failures: a city that returns thin results because 3 of 5 queries
+  // errored should leave a trail in the logs, not look like a healthy-but-quiet scrape.
+  if (errors.length > 0) {
+    console.warn(`[fm-scraper] ${city}: ${errors.length}/${queries.length} queries failed: ${errors.join("; ")}`);
+  }
+
+  if (byUrl.size === 0 && errors.length > 0 && errors.length === queries.length) {
     throw new Error(`All FM queries failed for ${city}: ${errors.join("; ")}`);
   }
   return [...byUrl.values()];
@@ -180,7 +187,11 @@ export async function upsertListings(city: string, listings: FmNormalizedListing
         .onConflictDoNothing()
         .run();
       if (r?.changes) inserted++;
-    } catch {}
+    } catch (e) {
+      // Don't let one bad row sink the batch, but never swallow it silently —
+      // a schema drift would otherwise show "0 inserted" with no trail to debug.
+      console.error(`[fm-scraper] failed to insert listing ${l.id} (${l.sourceUrl}):`, e);
+    }
   }
   return inserted;
 }
