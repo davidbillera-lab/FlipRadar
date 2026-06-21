@@ -2,7 +2,9 @@ import { z } from "zod";
 import { router, publicProcedure } from "./trpc.js";
 import { db, schema } from "./db/index.js";
 import { eq, sql, and, getTableColumns, type SQL } from "drizzle-orm";
-import { processUnscoredDeals, getDealStats, rescoreHighRoiFlags } from "./jobs/process-deals.js";
+import { resolveScraperCities } from "./lib/cities.js";
+import { processUnscoredDeals, getDealStats, rescoreHighRoiFlags, processFmListings } from "./jobs/process-deals.js";
+import { scrapeCity, upsertListings } from "./services/fm-scraper.js";
 import {
   scrapeCraigslist,
   scrapeCraigslistGarageSales,
@@ -56,57 +58,6 @@ const garageSalesWithNid = () =>
     .select({ ...getTableColumns(schema.garageSales), nid: sql<number>`rowid` })
     .from(schema.garageSales)
     .$dynamic();
-
-/**
- * Determine which cities to scrape for the deal feed. Priority:
- *   1. cities[] passed in the mutation input
- *   2. city (single) passed in the mutation input
- *   3. settings.scraper_cities (JSON array, e.g. ["Denver","Boulder"])
- *   4. settings.scraper_city (single string)
- *   5. process.env.SCRAPER_CITY (comma-separated allowed)
- *   6. fallback: ["denver"]
- */
-async function resolveScraperCities(
-  inputCity?: string,
-  inputCities?: string[],
-): Promise<string[]> {
-  if (inputCities?.length) return inputCities;
-  if (inputCity) return [inputCity];
-
-  const arrRow = await db
-    .select()
-    .from(schema.settings)
-    .where(eq(schema.settings.key, "scraper_cities"))
-    .get();
-  if (arrRow) {
-    try {
-      const parsed = JSON.parse(arrRow.value);
-      if (Array.isArray(parsed) && parsed.length) return parsed.map(String);
-      if (typeof parsed === "string" && parsed.trim()) return [parsed];
-    } catch {}
-  }
-
-  const singleRow = await db
-    .select()
-    .from(schema.settings)
-    .where(eq(schema.settings.key, "scraper_city"))
-    .get();
-  if (singleRow) {
-    try {
-      const v = JSON.parse(singleRow.value);
-      if (typeof v === "string" && v.trim()) return [v];
-    } catch {
-      if (singleRow.value) return [singleRow.value];
-    }
-  }
-
-  const envCity = process.env.SCRAPER_CITY;
-  if (envCity?.trim()) {
-    return envCity.split(",").map((s) => s.trim()).filter(Boolean);
-  }
-
-  return ["denver"];
-}
 
 function reshapeGarageSale(s: any) {
   if (!s) return null;
@@ -482,6 +433,48 @@ export const appRouter = router({
           await db.update(schema.garageSales).set(patch).where(sql`rowid = ${input.id}`).run();
         }
         return { ok: true };
+      }),
+  }),
+
+  fm: router({
+    scrapeStatus: publicProcedure.query(async () => {
+      const jobs = await db.select().from(schema.fmScrapeJobs).all();
+      return jobs;
+    }),
+
+    triggerScrape: publicProcedure
+      .input(z.object({ city: z.string().min(1) }))
+      .mutation(async ({ input }) => {
+        const { city } = input;
+        await db
+          .insert(schema.fmScrapeJobs)
+          .values({ city, status: "running", errorMsg: null })
+          .onConflictDoUpdate({ target: schema.fmScrapeJobs.city, set: { status: "running", errorMsg: null } })
+          .run();
+        try {
+          const listings = await scrapeCity(city);
+          const inserted = await upsertListings(city, listings);
+          await db
+            .insert(schema.fmScrapeJobs)
+            .values({ city, status: "done", lastScrapedAt: new Date(), listingsFound: listings.length, errorMsg: null })
+            .onConflictDoUpdate({
+              target: schema.fmScrapeJobs.city,
+              set: { status: "done", lastScrapedAt: new Date(), listingsFound: listings.length, errorMsg: null },
+            })
+            .run();
+          await processFmListings();
+          return { ok: true, listingsFound: listings.length, inserted };
+        } catch (e) {
+          await db
+            .insert(schema.fmScrapeJobs)
+            .values({ city, status: "error", errorMsg: (e as Error).message })
+            .onConflictDoUpdate({
+              target: schema.fmScrapeJobs.city,
+              set: { status: "error", errorMsg: (e as Error).message },
+            })
+            .run();
+          throw e;
+        }
       }),
   }),
 

@@ -10,11 +10,24 @@ type Settings = {
   [key: string]: unknown;
 };
 
+type FmStatusRow = {
+  city: string;
+  lastScrapedAt: Date | null;
+  status: string;
+  listingsFound: number;
+  errorMsg: string | null;
+};
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Settings>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
+
+  // FM scrape status
+  const [fmStatus, setFmStatus] = useState<FmStatusRow[]>([]);
+  const [fmLoading, setFmLoading] = useState(true);
+  const [fmScraping, setFmScraping] = useState<Record<string, boolean>>({});
 
   // Form state
   const [roiThreshold, setRoiThreshold] = useState("");
@@ -33,6 +46,34 @@ export default function SettingsPage() {
       .catch(console.error)
       .finally(() => setLoading(false));
   }, []);
+
+  async function loadFmStatus() {
+    setFmLoading(true);
+    try {
+      const rows = await trpc.fm.scrapeStatus.query();
+      setFmStatus(rows as FmStatusRow[]);
+    } catch (e) {
+      console.error("Failed to load FM status:", e);
+    } finally {
+      setFmLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadFmStatus();
+  }, []);
+
+  async function handleFmScrape(city: string) {
+    setFmScraping((prev) => ({ ...prev, [city]: true }));
+    try {
+      await trpc.fm.triggerScrape.mutate({ city });
+      await loadFmStatus();
+    } catch (e) {
+      console.error("FM scrape failed:", e);
+    } finally {
+      setFmScraping((prev) => ({ ...prev, [city]: false }));
+    }
+  }
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -136,6 +177,82 @@ export default function SettingsPage() {
           <pre className="mt-2 overflow-auto rounded-lg bg-zinc-50 p-3 text-xs">{JSON.stringify(settings, null, 2)}</pre>
         </details>
       )}
+
+      {/* FM Scrape Status */}
+      <section className="max-w-lg rounded-xl border border-zinc-200 bg-white p-5 space-y-4">
+        <h2 className="text-sm font-semibold">FM Scrape Status</h2>
+        {fmLoading ? (
+          <p className="text-sm text-zinc-400">Loading…</p>
+        ) : (() => {
+          const cityList = cities.split(",").map((c) => c.trim()).filter(Boolean);
+          if (cityList.length === 0) {
+            return <p className="text-sm text-zinc-400">No cities configured. Add cities in the Scraper section above and save.</p>;
+          }
+          const statusMap = new Map(fmStatus.map((r) => [r.city.toLowerCase(), r]));
+          return (
+            <div className="overflow-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-zinc-100 text-left text-zinc-500">
+                    <th className="pb-2 pr-4 font-medium">City</th>
+                    <th className="pb-2 pr-4 font-medium">Status</th>
+                    <th className="pb-2 pr-4 font-medium">Last Scraped</th>
+                    <th className="pb-2 pr-4 font-medium">Listings Found</th>
+                    <th className="pb-2 font-medium">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cityList.map((city) => {
+                    const row = statusMap.get(city.toLowerCase());
+                    return (
+                      <tr key={city} className="border-b border-zinc-50 last:border-0">
+                        <td className="py-2 pr-4 font-medium text-zinc-800">{city}</td>
+                        <td className="py-2 pr-4">
+                          {row ? (
+                            <>
+                              <span
+                                className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                                  row.status === "done"
+                                    ? "bg-green-100 text-green-800"
+                                    : row.status === "error"
+                                    ? "bg-red-100 text-red-800"
+                                    : "bg-yellow-100 text-yellow-800"
+                                }`}
+                              >
+                                {row.status}
+                              </span>
+                              {row.status === "error" && row.errorMsg && (
+                                <p className="mt-1 text-red-600">{row.errorMsg}</p>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-zinc-400">Never run</span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-4 text-zinc-500">
+                          {row?.lastScrapedAt
+                            ? new Date(row.lastScrapedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+                            : "Never"}
+                        </td>
+                        <td className="py-2 pr-4 text-zinc-700">{row?.listingsFound ?? "—"}</td>
+                        <td className="py-2">
+                          <button
+                            onClick={() => handleFmScrape(city)}
+                            disabled={!!fmScraping[city]}
+                            className="rounded-lg bg-zinc-900 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50"
+                          >
+                            {fmScraping[city] ? "Scraping…" : "Scrape Now"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
+      </section>
     </div>
   );
 }
