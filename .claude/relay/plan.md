@@ -12,7 +12,7 @@
 | # | What | Who | Status |
 |---|---|---|---|
 | 1 | Supabase FlipRadar-prod project provision | Lead (Opus 4.8) via MCP | COMPLETE ✓ |
-| 2 | SQLite → Postgres driver swap + ~42 call-site conversions | Fresh Sonnet 4.6 agent | IN PROGRESS |
+| 2 | SQLite → Postgres driver swap + ~42 call-site conversions | Fresh Sonnet 4.6 agent | COMPLETE ✓ |
 | 3 | Railway backend deploy | David manually | PENDING |
 | 4 | Vercel frontend deploy | Lead via Vercel MCP | PENDING |
 | 5 | Smoke test + close-out + MC sync | qa-verifier + Lead | PENDING |

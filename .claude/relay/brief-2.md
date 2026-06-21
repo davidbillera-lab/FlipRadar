@@ -21,7 +21,8 @@ Convert the FlipRadar server from SQLite (better-sqlite3 + drizzle sqlite-core) 
 
 - Piece 1 complete: Supabase FlipRadar-prod project is ACTIVE_HEALTHY, empty (no tables yet)
 - All server code is written against `better-sqlite3` sync calls and `drizzle-orm/sqlite-core`
-- `.env` has `DATABASE_URL` set to the Supabase connection URI (direct connection, not pooler) — confirm it's present before running migrations
+- `.env` does NOT have `DATABASE_URL` set — David will set it in Railway at deploy time. Do not require it to complete your piece.
+- `drizzle.config.ts` does NOT exist — you must create it (Step 11)
 - No application code changes were made in Piece 1
 
 ---
@@ -238,21 +239,38 @@ Also convert any sync Drizzle calls to async.
 
 ---
 
-### Step 11 — Generate + push Drizzle migrations
+### Step 11 — Create `drizzle.config.ts`
 
-```bash
-# Generate migration files for pg dialect
-npx drizzle-kit generate
+This file does NOT exist yet — create it:
 
-# Push schema to the Supabase project (uses DATABASE_URL from .env)
-npx drizzle-kit push
+```ts
+import type { Config } from "drizzle-kit";
+
+export default {
+  schema: "./server/db/schema.ts",
+  out: "./drizzle",
+  dialect: "postgresql",
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+} satisfies Config;
 ```
-
-After `push`, verify in Supabase Dashboard (or via `list_tables` if MCP available) that all 6 tables exist: `deals`, `garage_sales`, `settings`, `geocode_cache`, `fm_listings`, `fm_scrape_jobs`.
 
 ---
 
-### Step 12 — Type-check
+### Step 12 — Generate Drizzle migrations
+
+```bash
+npx drizzle-kit generate
+```
+
+This reads the schema and produces SQL migration files in `./drizzle/`. Do NOT run `drizzle-kit push` — there is no DATABASE_URL in the local `.env`. The Lead agent will apply the generated migrations to Supabase via MCP after you commit.
+
+Commit the generated migration files along with all code changes.
+
+---
+
+### Step 13 — Type-check
 
 ```bash
 npx tsc --noEmit
@@ -261,27 +279,18 @@ npx tsc --noEmit
 Fix any remaining type errors. Common ones after this migration:
 - Functions that return sync types now return `Promise<T>` — update callers
 - `BetterSQLite3Database` type still imported somewhere — remove it
-- `integer` used for timestamp columns — check schema matches actual usage
-
----
-
-### Step 13 — `drizzle.config.ts` — update dialect
-
-If a `drizzle.config.ts` file exists, ensure it specifies:
-```ts
-dialect: "postgresql",
-```
-Not `sqlite`. Also ensure `out:` points to the `drizzle/` migrations folder.
+- `rawDb` export removed from `server/db/index.ts` — any import of `rawDb` elsewhere must be removed or replaced
 
 ---
 
 ## Done when
 
 1. `npx tsc --noEmit` exits 0 (no type errors)
-2. `npx drizzle-kit push` completes — all 6 tables exist in the Supabase project `hgntosqexnrnjiqettca`
+2. `npx drizzle-kit generate` completes — migration SQL files exist in `./drizzle/`
 3. `better-sqlite3` is removed from `package.json` dependencies
 4. No `.run()`, `.all()`, `.get()` calls remain on Drizzle queries in the server codebase (grep to verify)
 5. `server/index.ts` CORS is locked to the `CORS_ORIGIN` env var (no `*`)
+6. All changed files + generated migration SQL files are committed to `phase-3-fm-scraper`
 
 ---
 

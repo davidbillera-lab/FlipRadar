@@ -4,6 +4,35 @@ Canonical log of meaningful decisions. Newest first. Every architectural/scope/d
 
 ---
 
+## 2026-06-21 — RLS disabled on all 6 Supabase tables — deferred to Phase 4
+
+**Decision:** Row Level Security (RLS) is intentionally left disabled on all 6 FlipRadar tables
+(`deals`, `fm_listings`, `fm_scrape_jobs`, `garage_sales`, `geocode_cache`, `settings`) through Phase 3.
+
+**Reasoning:** The current architecture routes all DB access through the Railway Express/tRPC backend
+using `DATABASE_URL` (service-level credentials). The frontend never queries Supabase directly — it
+only calls the tRPC API. RLS enforcement via the anon key is only relevant when a Supabase client
+library makes direct DB calls from the browser or a third-party context. That's not the case today.
+
+**When to enable:** Phase 4 (multi-tenant auth). When the frontend gains Supabase auth + direct
+Supabase client calls, enable RLS on each table with policies scoped to `auth.uid()`. Do not enable
+RLS without policies — enabling RLS with no policies blocks all access.
+
+**Tradeoff accepted:** Anyone who obtains the Supabase anon key can read/write tables directly. Since
+this is a single-tenant local tool with no public anon key exposure, risk is low until Phase 4.
+
+---
+
+## 2026-06-21 — SQLite → Postgres: fresh empty DB, no data migration
+
+**Decision:** No legacy SQLite data was ported to Supabase. DB starts empty; scraper repopulates on
+first cron run.
+
+**Reasoning:** SQLite data was ephemeral dev/test data with no production value. Porting it adds risk
+and complexity with no operator benefit. The scraper is the source of truth.
+
+---
+
 ## 2026-06-13 — Sold comps come from a shared Mission Control service, not a per-app scraper
 
 **Decision:** FlipRadar's `lookupEbayComps()` becomes a **thin client** of the shared
