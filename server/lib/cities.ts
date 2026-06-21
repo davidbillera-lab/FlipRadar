@@ -17,11 +17,11 @@ export async function resolveScraperCities(
   if (inputCities?.length) return inputCities;
   if (inputCity) return [inputCity];
 
-  const arrRow = await db
+  const arrRows = await db
     .select()
     .from(schema.settings)
-    .where(eq(schema.settings.key, "scraper_cities"))
-    .get();
+    .where(eq(schema.settings.key, "scraper_cities"));
+  const arrRow = arrRows[0];
   if (arrRow) {
     try {
       const parsed = JSON.parse(arrRow.value);
@@ -30,11 +30,11 @@ export async function resolveScraperCities(
     } catch {}
   }
 
-  const singleRow = await db
+  const singleRows = await db
     .select()
     .from(schema.settings)
-    .where(eq(schema.settings.key, "scraper_city"))
-    .get();
+    .where(eq(schema.settings.key, "scraper_city"));
+  const singleRow = singleRows[0];
   if (singleRow) {
     try {
       const v = JSON.parse(singleRow.value);

@@ -30,11 +30,11 @@ function toRow(d: any) {
   const {
     score, netProfit, roiPct, exitChannel, ebayFees,
     ebayAvgSold, ebayCompCount, ebaySearchQuery,
-    id: uuid, nid,
+    id: uuid,
     ...rest
   } = d;
   return {
-    deal: { ...rest, id: nid ?? 0, uuid },
+    deal: { ...rest, id: uuid, uuid },
     score: { score, netProfit, roiPct, exitChannel, ebayFees },
     valuation: {
       ebayAvgSold,
@@ -47,24 +47,12 @@ function toRow(d: any) {
   };
 }
 
-const dealsWithNid = () =>
-  db
-    .select({ ...getTableColumns(schema.deals), nid: sql<number>`rowid` })
-    .from(schema.deals)
-    .$dynamic();
-
-const garageSalesWithNid = () =>
-  db
-    .select({ ...getTableColumns(schema.garageSales), nid: sql<number>`rowid` })
-    .from(schema.garageSales)
-    .$dynamic();
-
 function reshapeGarageSale(s: any) {
   if (!s) return null;
   return {
     ...s,
     uuid: s.id,
-    id: s.nid ?? 0,
+    id: s.id,
     images: Array.isArray(s.images) ? s.images : [],
   };
 }
@@ -80,7 +68,8 @@ export const appRouter = router({
       const stats = await getDealStats();
       let topRow: any = null;
       if (stats.topDeal?.deal?.id) {
-        const top = await dealsWithNid().where(eq(schema.deals.id, stats.topDeal.deal.id)).get();
+        const tops = await db.select().from(schema.deals).where(eq(schema.deals.id, stats.topDeal.deal.id));
+        const top = tops[0];
         topRow = top ? toRow(top) : null;
       }
       return {
@@ -113,7 +102,7 @@ export const appRouter = router({
       .query(async ({ input }) => {
         const conds: SQL[] = [];
         if (input?.category && input.category !== "all") conds.push(eq(schema.deals.category, input.category));
-        if (input?.flaggedHighRoi || input?.highRoiOnly) conds.push(sql`flagged_high_roi = 1`);
+        if (input?.flaggedHighRoi || input?.highRoiOnly) conds.push(sql`flagged_high_roi = true`);
         if (input?.platform && input.platform !== "all") conds.push(eq(schema.deals.platform, input.platform));
         if (input?.exitChannel && input.exitChannel !== "all") conds.push(eq(schema.deals.exitChannel, input.exitChannel));
         if (input?.tracking) conds.push(sql`purchase_price IS NOT NULL`);
@@ -121,19 +110,19 @@ export const appRouter = router({
         else if (input?.status === "tracking") conds.push(sql`purchase_price IS NOT NULL AND sold_at IS NULL`);
         else if (input?.status === "available") conds.push(sql`purchase_price IS NULL`);
         const where = conds.length ? and(...conds) : undefined;
-        let q = dealsWithNid();
+        let q = db.select().from(schema.deals).$dynamic();
         if (where) q = q.where(where);
         const rows = await q
           .orderBy(sql`score DESC, created_at DESC`)
-          .limit(input?.limit ?? 200)
-          .all();
+          .limit(input?.limit ?? 200);
         return { rows: rows.map(toRow) };
       }),
 
     get: publicProcedure
-      .input(z.object({ id: z.union([z.string(), z.number()]).transform((v) => Number(v)) }))
+      .input(z.object({ id: z.union([z.string(), z.number()]).transform((v) => String(v)) }))
       .query(async ({ input }) => {
-        const d: any = await dealsWithNid().where(sql`rowid = ${input.id}`).get();
+        const rows = await db.select().from(schema.deals).where(eq(schema.deals.id, input.id));
+        const d: any = rows[0];
         if (!d) return { deal: null, score: null, valuation: null, tracking: null };
         const row = toRow(d)!;
         return {
@@ -167,7 +156,7 @@ export const appRouter = router({
             const found = await scrapeCraigslist({ city, category: cat, limit: 30 });
             for (const f of found) {
               try {
-                const r: any = await db
+                const rows = await db
                   .insert(schema.deals)
                   .values({
                     id: randomUUID(),
@@ -183,8 +172,8 @@ export const appRouter = router({
                     updatedAt: new Date(),
                   })
                   .onConflictDoNothing()
-                  .run();
-                if (r?.changes) clNew++;
+                  .returning({ id: schema.deals.id });
+                if (rows.length) clNew++;
                 else clSkipped++;
               } catch {
                 clSkipped++;
@@ -228,15 +217,14 @@ export const appRouter = router({
             createdAt: new Date(),
             updatedAt: new Date(),
           })
-          .onConflictDoNothing()
-          .run();
+          .onConflictDoNothing();
         return { id };
       }),
 
     updateTracking: publicProcedure
       .input(
         z.object({
-          dealId: z.union([z.string(), z.number()]).transform((v) => Number(v)),
+          dealId: z.union([z.string(), z.number()]).transform((v) => String(v)),
           purchasePrice: z.number().nullable().optional(),
           soldPrice: z.number().nullable().optional(),
           actualRoi: z.number().nullable().optional(),
@@ -261,8 +249,7 @@ export const appRouter = router({
             trackingNotes: input.notes ?? null,
             updatedAt: new Date(),
           })
-          .where(sql`rowid = ${input.dealId}`)
-          .run();
+          .where(eq(schema.deals.id, input.dealId));
         return { ok: true };
       }),
   }),
@@ -284,26 +271,26 @@ export const appRouter = router({
           if (city) conds.push(eq(schema.garageSales.city, city));
           if (input?.status && input.status !== "all") conds.push(eq(schema.garageSales.status, input.status));
           const where = conds.length ? and(...conds) : undefined;
-          let q = garageSalesWithNid();
+          let q = db.select().from(schema.garageSales).$dynamic();
           if (where) q = q.where(where);
           return q.orderBy(sql`created_at DESC`).limit(input?.limit ?? 200);
         };
 
-        let raw = await buildQuery(input?.city).all();
+        let raw = await buildQuery(input?.city);
         // If the requested city returned nothing but we just scraped a different
         // city, surface those rows instead so they aren't invisible to the UI.
         if (raw.length === 0 && input?.city && lastScrapedCityWithRows && lastScrapedCityWithRows !== input.city) {
-          raw = await buildQuery(lastScrapedCityWithRows).all();
+          raw = await buildQuery(lastScrapedCityWithRows);
         }
         const rows = raw.map(reshapeGarageSale);
         return { rows, sales: rows, total: rows.length };
       }),
 
     get: publicProcedure
-      .input(z.object({ id: z.union([z.string(), z.number()]).transform((v) => Number(v)) }))
+      .input(z.object({ id: z.union([z.string(), z.number()]).transform((v) => String(v)) }))
       .query(async ({ input }) => {
-        const s: any = await garageSalesWithNid().where(sql`rowid = ${input.id}`).get();
-        return { sale: reshapeGarageSale(s) };
+        const rows = await db.select().from(schema.garageSales).where(eq(schema.garageSales.id, input.id));
+        return { sale: reshapeGarageSale(rows[0] ?? null) };
       }),
 
     scrape: publicProcedure
@@ -349,7 +336,7 @@ export const appRouter = router({
             }
 
             try {
-              const r: any = await db
+              const inserted = await db
                 .insert(schema.garageSales)
                 .values({
                   id: randomUUID(),
@@ -366,8 +353,8 @@ export const appRouter = router({
                   createdAt: new Date(),
                 })
                 .onConflictDoNothing()
-                .run();
-              if (r?.changes) {
+                .returning({ id: schema.garageSales.id });
+              if (inserted.length) {
                 newListings++;
                 lastScrapedCityWithRows = s.city;
               }
@@ -388,7 +375,7 @@ export const appRouter = router({
                 }
               }
               try {
-                const r: any = await db
+                const inserted = await db
                   .insert(schema.garageSales)
                   .values({
                     id: randomUUID(),
@@ -405,8 +392,8 @@ export const appRouter = router({
                     createdAt: new Date(),
                   })
                   .onConflictDoNothing()
-                  .run();
-                if (r?.changes) {
+                  .returning({ id: schema.garageSales.id });
+                if (inserted.length) {
                   newListings++;
                   lastScrapedCityWithRows = s.city;
                 }
@@ -420,7 +407,7 @@ export const appRouter = router({
     update: publicProcedure
       .input(
         z.object({
-          id: z.union([z.string(), z.number()]).transform((v) => Number(v)),
+          id: z.union([z.string(), z.number()]).transform((v) => String(v)),
           status: z.string().optional(),
           notes: z.string().optional(),
         }),
@@ -430,7 +417,7 @@ export const appRouter = router({
         if (input.status !== undefined) patch.status = input.status;
         if (input.notes !== undefined) patch.notes = input.notes;
         if (Object.keys(patch).length) {
-          await db.update(schema.garageSales).set(patch).where(sql`rowid = ${input.id}`).run();
+          await db.update(schema.garageSales).set(patch).where(eq(schema.garageSales.id, input.id));
         }
         return { ok: true };
       }),
@@ -438,7 +425,7 @@ export const appRouter = router({
 
   fm: router({
     scrapeStatus: publicProcedure.query(async () => {
-      const jobs = await db.select().from(schema.fmScrapeJobs).all();
+      const jobs = await db.select().from(schema.fmScrapeJobs);
       return jobs;
     }),
 
@@ -449,8 +436,7 @@ export const appRouter = router({
         await db
           .insert(schema.fmScrapeJobs)
           .values({ city, status: "running", errorMsg: null })
-          .onConflictDoUpdate({ target: schema.fmScrapeJobs.city, set: { status: "running", errorMsg: null } })
-          .run();
+          .onConflictDoUpdate({ target: schema.fmScrapeJobs.city, set: { status: "running", errorMsg: null } });
         try {
           const listings = await scrapeCity(city);
           const inserted = await upsertListings(city, listings);
@@ -460,8 +446,7 @@ export const appRouter = router({
             .onConflictDoUpdate({
               target: schema.fmScrapeJobs.city,
               set: { status: "done", lastScrapedAt: new Date(), listingsFound: listings.length, errorMsg: null },
-            })
-            .run();
+            });
           await processFmListings();
           return { ok: true, listingsFound: listings.length, inserted };
         } catch (e) {
@@ -471,8 +456,7 @@ export const appRouter = router({
             .onConflictDoUpdate({
               target: schema.fmScrapeJobs.city,
               set: { status: "error", errorMsg: (e as Error).message },
-            })
-            .run();
+            });
           throw e;
         }
       }),
@@ -480,7 +464,7 @@ export const appRouter = router({
 
   settings: router({
     get: publicProcedure.query(async () => {
-      const rows = await db.select().from(schema.settings).all();
+      const rows = await db.select().from(schema.settings);
       const out: Record<string, any> = {};
       for (const r of rows) {
         try {
@@ -498,8 +482,7 @@ export const appRouter = router({
           await db
             .insert(schema.settings)
             .values({ key, value: JSON.stringify(value) })
-            .onConflictDoUpdate({ target: schema.settings.key, set: { value: JSON.stringify(value) } })
-            .run();
+            .onConflictDoUpdate({ target: schema.settings.key, set: { value: JSON.stringify(value) } });
         }
         // Re-evaluate high-ROI flag against new thresholds
         try {

@@ -10,7 +10,8 @@ const HIGH_ROI_THRESHOLD_DEFAULT = 35;
 const MIN_NET_PROFIT_DEFAULT = 25;
 
 async function getNumericSetting(key: string, fallback: number): Promise<number> {
-  const row = await db.select().from(schema.settings).where(eq(schema.settings.key, key)).get();
+  const rows = await db.select().from(schema.settings).where(eq(schema.settings.key, key));
+  const row = rows[0];
   if (!row) return fallback;
   // settings are stored as JSON-encoded strings (e.g. "35"); strip quotes and parse
   let raw: any = row.value;
@@ -23,8 +24,7 @@ export async function processUnscoredDeals(): Promise<{ processed: number; flagg
   const unscored = await db
     .select()
     .from(schema.deals)
-    .where(or(isNull(schema.deals.score), isNull(schema.deals.ebayAvgSold)))
-    .all();
+    .where(or(isNull(schema.deals.score), isNull(schema.deals.ebayAvgSold)));
 
   const roiThreshold = await getNumericSetting("roi_threshold_min", HIGH_ROI_THRESHOLD_DEFAULT);
   const minProfit = await getNumericSetting("min_profit_dollars", MIN_NET_PROFIT_DEFAULT);
@@ -110,8 +110,7 @@ export async function rescoreHighRoiFlags(): Promise<{
   const scored = await db
     .select()
     .from(schema.deals)
-    .where(sql`score IS NOT NULL`)
-    .all();
+    .where(sql`score IS NOT NULL`);
 
   let newlyFlagged = 0;
   let unflagged = 0;
@@ -123,8 +122,7 @@ export async function rescoreHighRoiFlags(): Promise<{
       await db
         .update(schema.deals)
         .set({ flaggedHighRoi: shouldFlag, updatedAt: new Date() })
-        .where(eq(schema.deals.id, d.id))
-        .run();
+        .where(eq(schema.deals.id, d.id));
       if (shouldFlag) newlyFlagged++;
       else unflagged++;
     }
@@ -143,8 +141,7 @@ export async function processFmListings(): Promise<{ processed: number }> {
     .select()
     .from(schema.fmListings)
     .where(eq(schema.fmListings.processed, false))
-    .limit(50)
-    .all();
+    .limit(50);
 
   let processed = 0;
 
@@ -159,15 +156,14 @@ export async function processFmListings(): Promise<{ processed: number }> {
         await db
           .update(schema.fmListings)
           .set({ processed: true })
-          .where(eq(schema.fmListings.id, listing.id))
-          .run();
+          .where(eq(schema.fmListings.id, listing.id));
         continue;
       }
 
       const images: string[] = Array.isArray(listing.images) ? listing.images : [];
       const imageUrl = images[0] ?? null;
 
-      const r: any = await db
+      const inserted = await db
         .insert(schema.deals)
         .values({
           id: randomUUID(),
@@ -182,16 +178,15 @@ export async function processFmListings(): Promise<{ processed: number }> {
           updatedAt: new Date(),
         })
         .onConflictDoNothing()
-        .run();
+        .returning({ id: schema.deals.id });
 
       // Whether we inserted or skipped (conflict), mark FM listing as processed
       await db
         .update(schema.fmListings)
         .set({ processed: true })
-        .where(eq(schema.fmListings.id, listing.id))
-        .run();
+        .where(eq(schema.fmListings.id, listing.id));
 
-      if (r?.changes) processed++;
+      if (inserted.length) processed++;
     } catch (e) {
       console.error(`[process-fm] failed for ${listing.id}:`, (e as Error).message);
     }
@@ -201,32 +196,34 @@ export async function processFmListings(): Promise<{ processed: number }> {
 }
 
 export async function getDealStats() {
-  const total = await db.select({ c: sql<number>`count(*)` }).from(schema.deals).get();
-  const avgScore = await db
+  const totalRows = await db.select({ c: sql<number>`count(*)` }).from(schema.deals);
+  const avgScoreRows = await db
     .select({ a: sql<number>`avg(score)` })
-    .from(schema.deals)
-    .get();
-  const totalProfit = await db
+    .from(schema.deals);
+  const totalProfitRows = await db
     .select({ s: sql<number>`sum(net_profit)` })
     .from(schema.deals)
-    .where(sql`flagged_high_roi = 1`)
-    .get();
-  const sold = await db
+    .where(sql`flagged_high_roi = true`);
+  const soldRows = await db
     .select({ c: sql<number>`count(*)` })
     .from(schema.deals)
-    .where(sql`sold_at IS NOT NULL`)
-    .get();
-  const highRoi = await db
+    .where(sql`sold_at IS NOT NULL`);
+  const highRoiRows = await db
     .select({ c: sql<number>`count(*)` })
     .from(schema.deals)
-    .where(sql`flagged_high_roi = 1`)
-    .get();
-  const top = await db
+    .where(sql`flagged_high_roi = true`);
+  const topRows = await db
     .select()
     .from(schema.deals)
     .orderBy(sql`score DESC`)
-    .limit(1)
-    .get();
+    .limit(1);
+
+  const total = totalRows[0];
+  const avgScore = avgScoreRows[0];
+  const totalProfit = totalProfitRows[0];
+  const sold = soldRows[0];
+  const highRoi = highRoiRows[0];
+  const top = topRows[0];
 
   return {
     totalDeals: Number(total?.c ?? 0),

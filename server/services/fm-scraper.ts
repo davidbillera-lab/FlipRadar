@@ -181,12 +181,12 @@ export async function upsertListings(city: string, listings: FmNormalizedListing
   let inserted = 0;
   for (const l of listings) {
     try {
-      const r: any = await db
+      const rows = await db
         .insert(schema.fmListings)
         .values(l)
         .onConflictDoNothing()
-        .run();
-      if (r?.changes) inserted++;
+        .returning({ id: schema.fmListings.id });
+      inserted += rows.length;
     } catch (e) {
       // Don't let one bad row sink the batch, but never swallow it silently —
       // a schema drift would otherwise show "0 inserted" with no trail to debug.

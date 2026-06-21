@@ -1,6 +1,6 @@
-import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { pgTable, text, integer, real, boolean, timestamp, jsonb, doublePrecision } from "drizzle-orm/pg-core";
 
-export const deals = sqliteTable("deals", {
+export const deals = pgTable("deals", {
   id: text("id").primaryKey(),
   platform: text("platform").notNull(),
   sourceUrl: text("source_url").notNull(),
@@ -21,17 +21,17 @@ export const deals = sqliteTable("deals", {
   roiPct: real("roi_pct"),
   score: integer("score"),
   exitChannel: text("exit_channel"),
-  flaggedHighRoi: integer("flagged_high_roi", { mode: "boolean" }).default(false),
+  flaggedHighRoi: boolean("flagged_high_roi").default(false),
   purchasePrice: real("purchase_price"),
   soldPrice: real("sold_price"),
   actualRoi: real("actual_roi"),
-  soldAt: integer("sold_at", { mode: "timestamp" }),
+  soldAt: timestamp("sold_at"),
   trackingNotes: text("tracking_notes"),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+  createdAt: timestamp("created_at").notNull(),
+  updatedAt: timestamp("updated_at").notNull(),
 });
 
-export const garageSales = sqliteTable("garage_sales", {
+export const garageSales = pgTable("garage_sales", {
   id: text("id").primaryKey(),
   platform: text("platform").notNull(),
   sourceUrl: text("source_url").notNull(),
@@ -44,24 +44,24 @@ export const garageSales = sqliteTable("garage_sales", {
   saleDate: text("sale_date"),
   status: text("status").default("upcoming"),
   notes: text("notes"),
-  images: text("images", { mode: "json" }).$type<string[]>().default([]),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  images: jsonb("images").$type<string[]>().default([]),
+  createdAt: timestamp("created_at").notNull(),
 });
 
-export const settings = sqliteTable("settings", {
+export const settings = pgTable("settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
 
-export const geocodeCache = sqliteTable("geocode_cache", {
+export const geocodeCache = pgTable("geocode_cache", {
   address: text("address").primaryKey(),
   lat: real("lat").notNull(),
   lng: real("lng").notNull(),
   formatted: text("formatted"),
-  createdAt: integer("created_at").notNull(),
+  createdAt: timestamp("created_at").notNull(),
 });
 
-export const fmListings = sqliteTable("fm_listings", {
+export const fmListings = pgTable("fm_listings", {
   id: text("id").primaryKey(),
   city: text("city").notNull(),
   title: text("title").notNull(),
@@ -69,15 +69,15 @@ export const fmListings = sqliteTable("fm_listings", {
   locationText: text("location_text"),
   sourceUrl: text("source_url").notNull(),
   description: text("description"),
-  images: text("images", { mode: "json" }).$type<string[]>().default([]),
-  postedAt: integer("posted_at", { mode: "timestamp" }),
-  scrapedAt: integer("scraped_at", { mode: "timestamp" }).notNull(),
-  processed: integer("processed", { mode: "boolean" }).default(false),
+  images: jsonb("images").$type<string[]>().default([]),
+  postedAt: timestamp("posted_at"),
+  scrapedAt: timestamp("scraped_at").notNull(),
+  processed: boolean("processed").default(false),
 });
 
-export const fmScrapeJobs = sqliteTable("fm_scrape_jobs", {
+export const fmScrapeJobs = pgTable("fm_scrape_jobs", {
   city: text("city").primaryKey(),
-  lastScrapedAt: integer("last_scraped_at", { mode: "timestamp" }),
+  lastScrapedAt: timestamp("last_scraped_at"),
   status: text("status").default("pending"),
   listingsFound: integer("listings_found").default(0),
   errorMsg: text("error_msg"),

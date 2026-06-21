@@ -1,5 +1,6 @@
 import { request } from "undici";
-import { rawDb } from "../db/index.js";
+import { db, schema } from "../db/index.js";
+import { eq } from "drizzle-orm";
 
 export interface GeocodeResult {
   lat: number;
@@ -7,35 +8,23 @@ export interface GeocodeResult {
   formatted?: string;
 }
 
-// Lazy-init prepared statements so this module is safe to import before
-// migrations have run (e.g. during top-level evaluation of router.ts).
-let _selectStmt: ReturnType<typeof rawDb.prepare> | null = null;
-let _insertStmt: ReturnType<typeof rawDb.prepare> | null = null;
-function stmts() {
-  if (!_selectStmt) {
-    _selectStmt = rawDb.prepare(
-      "SELECT lat, lng, formatted FROM geocode_cache WHERE address = ?",
-    );
-    _insertStmt = rawDb.prepare(
-      "INSERT OR REPLACE INTO geocode_cache (address, lat, lng, formatted, created_at) VALUES (?, ?, ?, ?, ?)",
-    );
-  }
-  return { select: _selectStmt!, insert: _insertStmt! };
-}
-
 export async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
   const trimmed = address.trim();
   if (!trimmed) return null;
 
-  let hit: any = null;
+  // Check cache first
   try {
-    hit = stmts().select.get(trimmed);
+    const rows = await db
+      .select()
+      .from(schema.geocodeCache)
+      .where(eq(schema.geocodeCache.address, trimmed));
+    const hit = rows[0];
+    if (hit) {
+      return { lat: hit.lat, lng: hit.lng, formatted: hit.formatted ?? undefined };
+    }
   } catch (e) {
-    // table missing — fall through to API call (no cache)
+    // Table missing or DB error — fall through to API call (no cache)
     console.warn(`[geocode] cache read failed (continuing): ${(e as Error).message}`);
-  }
-  if (hit) {
-    return { lat: hit.lat, lng: hit.lng, formatted: hit.formatted ?? undefined };
   }
 
   const key = process.env.GOOGLE_MAPS_API_KEY;
@@ -68,7 +57,24 @@ export async function geocodeAddress(address: string): Promise<GeocodeResult | n
       formatted: r.formatted_address,
     };
     try {
-      stmts().insert.run(trimmed, result.lat, result.lng, result.formatted ?? null, Date.now());
+      await db
+        .insert(schema.geocodeCache)
+        .values({
+          address: trimmed,
+          lat: result.lat,
+          lng: result.lng,
+          formatted: result.formatted ?? null,
+          createdAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: schema.geocodeCache.address,
+          set: {
+            lat: result.lat,
+            lng: result.lng,
+            formatted: result.formatted ?? null,
+            createdAt: new Date(),
+          },
+        });
     } catch (e) {
       console.warn(`[geocode] cache write failed (continuing): ${(e as Error).message}`);
     }

@@ -71,7 +71,7 @@ export async function optimizeRoute(opts: {
     }
     const route = data.routes[0];
     const order: number[] = route.waypoint_order ?? sales.map((_, i) => i);
-    const orderedWaypoints = order.map((i) => sales[i]);
+    const orderedWaypoints = order.map((i) => sales[i]).filter((s): s is NonNullable<typeof s> => s != null);
 
     let totalDistance = 0;
     let totalDuration = 0;

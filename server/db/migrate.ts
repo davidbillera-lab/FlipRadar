@@ -1,86 +1,28 @@
-import { rawDb } from "./index.js";
+import { migrate } from "drizzle-orm/postgres-js/migrator";
+import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
+import path from "path";
+import { fileURLToPath } from "url";
 
-const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS deals (
-  id TEXT PRIMARY KEY, platform TEXT NOT NULL, source_url TEXT NOT NULL,
-  title TEXT NOT NULL, description TEXT, category TEXT, city TEXT,
-  asking_price REAL NOT NULL, image_url TEXT,
-  ai_brand TEXT, ai_model TEXT, ai_product TEXT,
-  ebay_avg_sold REAL, ebay_comp_count INTEGER, ebay_search_query TEXT,
-  ebay_fees REAL, net_profit REAL, roi_pct REAL, score INTEGER,
-  exit_channel TEXT, flagged_high_roi INTEGER DEFAULT 0,
-  purchase_price REAL, sold_price REAL, actual_roi REAL,
-  sold_at INTEGER, tracking_notes TEXT,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_deals_score ON deals(score DESC);
-CREATE INDEX IF NOT EXISTS idx_deals_flagged ON deals(flagged_high_roi);
-CREATE INDEX IF NOT EXISTS idx_deals_category ON deals(category);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_deals_source_url ON deals(source_url);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-CREATE TABLE IF NOT EXISTS garage_sales (
-  id TEXT PRIMARY KEY, platform TEXT NOT NULL, source_url TEXT NOT NULL,
-  title TEXT NOT NULL, description TEXT, city TEXT NOT NULL,
-  address TEXT, lat REAL, lng REAL, sale_date TEXT,
-  status TEXT DEFAULT 'upcoming', notes TEXT,
-  images TEXT DEFAULT '[]', created_at INTEGER NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_garage_source_url ON garage_sales(source_url);
-
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-
-CREATE TABLE IF NOT EXISTS geocode_cache (
-  address TEXT PRIMARY KEY,
-  lat REAL NOT NULL,
-  lng REAL NOT NULL,
-  formatted TEXT,
-  created_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS fm_listings (
-  id TEXT PRIMARY KEY,
-  city TEXT NOT NULL,
-  title TEXT NOT NULL,
-  price_cents INTEGER,
-  location_text TEXT,
-  source_url TEXT NOT NULL,
-  description TEXT,
-  images TEXT DEFAULT '[]',
-  posted_at INTEGER,
-  scraped_at INTEGER NOT NULL,
-  processed INTEGER DEFAULT 0
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_fm_listings_source_url ON fm_listings(source_url);
-CREATE INDEX IF NOT EXISTS idx_fm_listings_city_scraped ON fm_listings(city, scraped_at DESC);
-CREATE INDEX IF NOT EXISTS idx_fm_listings_processed ON fm_listings(processed);
-
-CREATE TABLE IF NOT EXISTS fm_scrape_jobs (
-  city TEXT PRIMARY KEY,
-  last_scraped_at INTEGER,
-  status TEXT DEFAULT 'pending',
-  listings_found INTEGER DEFAULT 0,
-  error_msg TEXT
-);
-`;
-
-const ALTER_SQL = [
-  "ALTER TABLE deals ADD COLUMN actual_roi REAL",
-  "ALTER TABLE garage_sales ADD COLUMN status TEXT DEFAULT 'upcoming'",
-  "ALTER TABLE garage_sales ADD COLUMN notes TEXT",
-];
-
-export function runMigrations() {
-  rawDb.exec(SCHEMA_SQL);
-  for (const sql of ALTER_SQL) {
-    try {
-      rawDb.exec(sql);
-    } catch {}
+export async function runMigrations() {
+  if (!process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL is required to run migrations");
   }
+  const client = postgres(process.env.DATABASE_URL, { max: 1 });
+  const db = drizzle(client);
+  await migrate(db, { migrationsFolder: path.join(__dirname, "../../drizzle") });
+  await client.end();
 }
 
-// Always run when this file is invoked directly (npm run db:migrate).
-// The previous `import.meta.url === file://${argv[1]}` check fails on Windows
-// because of slash/case differences. Detecting "is CLI" is unreliable across
-// platforms, so we just always run — runMigrations is idempotent.
-runMigrations();
-console.log("Migrations applied.");
+// Run when invoked directly via npm run db:migrate
+runMigrations()
+  .then(() => {
+    console.log("Migrations applied.");
+    process.exit(0);
+  })
+  .catch((e) => {
+    console.error("Migration failed:", e);
+    process.exit(1);
+  });
